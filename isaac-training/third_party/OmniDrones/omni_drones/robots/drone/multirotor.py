@@ -279,13 +279,25 @@ class MultirotorBase(RobotBase):
             ).sum(-2)
         self.forces[:] += (self.drag_coef * self.masses) * self.vel[..., :3]
 
-        self.rotors_view.apply_forces_and_torques_at_pos(
-            self.thrusts.reshape(-1, 3), 
-            is_global=False
-        )
+        self.pos[:], self.rot[:] = self.get_world_poses(True)
+        total_rotor_thrust_local = self.thrusts.sum(-2)
+        total_rotor_thrust_world = quat_rotate(self.rot, total_rotor_thrust_local)
+        total_force = total_rotor_thrust_world.reshape(-1, 3) + self.forces.reshape(-1, 3)
+        import math as _math
+        if not hasattr(self, "_arm_pos"):
+            arm = 0.17
+            angles = [0, _math.pi/2, _math.pi, -_math.pi/2]
+            self._arm_pos = torch.tensor(
+                [[arm*_math.cos(a), arm*_math.sin(a), 0.0] for a in angles],
+                device=self.device
+            )
+        arm_pos = self._arm_pos.expand(*self.shape, self.num_rotors, 3)
+        diff_torque_local = torch.cross(arm_pos, self.thrusts, dim=-1).sum(-2)
+        diff_torque_world = quat_rotate(self.rot, diff_torque_local)
+        total_torque = self.torques.reshape(-1, 3) + diff_torque_world.reshape(-1, 3)
         self.base_link.apply_forces_and_torques_at_pos(
-            self.forces.reshape(-1, 3), 
-            self.torques.reshape(-1, 3), 
+            forces=total_force,
+            torques=total_torque,
             is_global=True
         )
         self.throttle_difference[:] = torch.norm(self.throttle - last_throttle, dim=-1)

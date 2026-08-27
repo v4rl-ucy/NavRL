@@ -169,27 +169,40 @@ class RayCaster(SensorBase):
 
             # check if the prim is a plane - handle PhysX plane as a special case
             # if a plane exists then we need to create an infinite mesh that is a plane
-            mesh_prim = sim_utils.get_first_matching_child_prim(
-                mesh_prim_path, lambda prim: prim.GetTypeName() == "Plane"
-            )
-            # if we did not find a plane then we need to read the mesh
+            mesh_prim = None
+            # if we did not find a plane then we need to read all meshes
             if mesh_prim is None:
-                # obtain the mesh prim
-                mesh_prim = sim_utils.get_first_matching_child_prim(
-                    mesh_prim_path, lambda prim: prim.GetTypeName() == "Mesh"
+                from pxr import Usd
+                stage = Usd.Stage.Open(mesh_prim_path) if False else None
+                # Collect all Mesh prims under this path
+                root_prim = sim_utils.get_first_matching_child_prim(
+                    mesh_prim_path, lambda prim: True
                 )
-                # check if valid
-                if mesh_prim is None or not mesh_prim.IsValid():
+                if root_prim is None:
                     raise RuntimeError(f"Invalid mesh prim path: {mesh_prim_path}")
-                # cast into UsdGeomMesh
-                mesh_prim = UsdGeom.Mesh(mesh_prim)
-                # read the vertices and faces
-                points = np.asarray(mesh_prim.GetPointsAttr().Get())
-                indices = np.asarray(mesh_prim.GetFaceVertexIndicesAttr().Get())
+                stage = root_prim.GetStage()
+                parent_prim = stage.GetPrimAtPath(mesh_prim_path)
+                all_points = []
+                all_indices = []
+                vertex_offset = 0
+                for prim in Usd.PrimRange(parent_prim):
+                    if prim.GetTypeName() == "Mesh":
+                        mesh = UsdGeom.Mesh(prim)
+                        pts = mesh.GetPointsAttr().Get()
+                        idx = mesh.GetFaceVertexIndicesAttr().Get()
+                        if pts is not None and idx is not None:
+                            xform = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+                            pts_transformed = [xform.Transform(p) for p in pts]
+                            all_points.extend(pts_transformed)
+                            all_indices.extend([i + vertex_offset for i in idx])
+                            vertex_offset += len(pts)
+                if len(all_points) == 0:
+                    raise RuntimeError(f"No meshes found under: {mesh_prim_path}")
+                points = np.asarray(all_points, dtype=np.float32)
+                indices = np.asarray(all_indices, dtype=np.int32)
                 wp_mesh = convert_to_warp_mesh(points, indices, device=self.device)
-                # print info
                 carb.log_info(
-                    f"Read mesh prim: {mesh_prim.GetPath()} with {len(points)} vertices and {len(indices)} faces."
+                    f"Read {vertex_offset} vertices and {len(indices)} faces from all meshes under: {mesh_prim_path}"
                 )
             else:
                 mesh = make_plane(size=(2e6, 2e6), height=0.0, center_zero=True)
