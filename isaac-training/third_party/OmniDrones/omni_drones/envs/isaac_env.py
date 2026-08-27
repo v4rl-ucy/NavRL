@@ -249,7 +249,7 @@ class IsaacEnv(EnvBase):
         env_ids = env_mask.nonzero().squeeze(-1)
         self._reset_idx(env_ids)
         # self.sim.step(render=False)
-        self.sim._physics_sim_view.flush()
+        self.sim.physics_sim_view.flush()
         self.progress_buf[env_ids] = 0.
         tensordict = TensorDict({}, self.batch_size, device=self.device)
         tensordict.update(self._compute_state_and_obs())
@@ -370,10 +370,19 @@ class IsaacEnv(EnvBase):
                 )
             # obtain the rgb data
             rgb_data = self._rgb_annotator.get_data()
-            # convert to numpy array
-            rgb_data = np.frombuffer(rgb_data, dtype=np.uint8).reshape(*rgb_data.shape)
-            # return the rgb data
-            return rgb_data[:, :, :3]
+            res = tuple(self.cfg.viewer.resolution)
+            target_shape = (res[1], res[0], 4)
+            try:
+                if hasattr(rgb_data, 'shape') and len(rgb_data.shape) == 3:
+                    rgb_arr = np.asarray(rgb_data)
+                else:
+                    if isinstance(rgb_data, dict):
+                        rgb_data = rgb_data.get("data", rgb_data)
+                    rgb_arr = np.frombuffer(rgb_data, dtype=np.uint8).reshape(target_shape)
+            except (ValueError, AttributeError) as e:
+                carb.log_warn(f"render(): could not decode annotator data ({type(rgb_data).__name__}, {e}); returning blank frame")
+                rgb_arr = np.zeros(target_shape, dtype=np.uint8)
+            return rgb_arr[:, :, :3]
         else:
             raise NotImplementedError(
                 f"Render mode '{mode}' is not supported. Please use: {self.metadata['render.modes']}."

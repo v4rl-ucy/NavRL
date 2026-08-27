@@ -28,7 +28,6 @@ import torch
 import torch.distributions as D
 import yaml
 from functorch import vmap
-from tensordict.nn import make_functional
 from torchrl.data import BoundedTensorSpec, CompositeSpec, UnboundedContinuousTensorSpec
 from tensordict import TensorDict
 
@@ -134,7 +133,7 @@ class MultirotorBase(RobotBase):
         rotor_config = self.params["rotor_configuration"]
         self.rotors = RotorGroup(rotor_config, dt=self.dt).to(self.device)
 
-        rotor_params = make_functional(self.rotors)
+        rotor_params = TensorDict.from_module(self.rotors)
         self.KF_0 = rotor_params["KF"].clone()
         self.KM_0 = rotor_params["KM"].clone()
         self.MAX_ROT_VEL = (
@@ -250,7 +249,10 @@ class MultirotorBase(RobotBase):
     def apply_action(self, actions: torch.Tensor) -> torch.Tensor:
         rotor_cmds = actions.expand(*self.shape, self.num_rotors)
         last_throttle = self.throttle.clone()
-        thrusts, moments = vmap(vmap(self.rotors, randomness="different"), randomness="same")(
+        def _call_rotors(cmds, params):
+            with params.to_module(self.rotors):
+                return self.rotors(cmds)
+        thrusts, moments = vmap(vmap(_call_rotors, randomness="different"), randomness="same")(
             rotor_cmds, self.rotor_params
         )
 

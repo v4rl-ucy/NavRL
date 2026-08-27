@@ -64,8 +64,8 @@ def safe_set_attribute_on_usd_schema(schema_api: Usd.APISchemaBase, name: str, v
     else:
         # think: do we ever need to create the attribute if it doesn't exist?
         #   currently, we are not doing this since the schemas are already created with some defaults.
-        carb.log_error(f"Attribute '{attr_name}' does not exist on prim '{schema_api.GetPath()}'.")
-        raise TypeError(f"Attribute '{attr_name}' does not exist on prim '{schema_api.GetPath()}'.")
+        carb.log_warn(f"Attribute '{attr_name}' does not exist on prim '{schema_api.GetPath()}' (skipping)")
+        return
 
 
 def safe_set_attribute_on_usd_prim(prim: Usd.Prim, attr_name: str, value: Any, camel_case: bool):

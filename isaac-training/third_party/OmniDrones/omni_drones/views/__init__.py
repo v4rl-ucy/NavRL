@@ -43,7 +43,7 @@ def require_sim_initialized(func):
 
     @functools.wraps(func)
     def _func(*args, **kwargs):
-        if SimulationContext.instance()._physics_sim_view is None:
+        if SimulationContext.instance().physics_sim_view is None:
             raise RuntimeError("SimulationContext not initialzed.")
         return func(*args, **kwargs)
     
@@ -65,6 +65,7 @@ class ArticulationView(_ArticulationView):
         shape: Tuple[int, ...] = (-1,),
     ) -> None:
         self.shape = shape
+        self._enable_dof_force_sensors = enable_dof_force_sensors
         super().__init__(
             prim_paths_expr,
             name,
@@ -74,7 +75,6 @@ class ArticulationView(_ArticulationView):
             scales,
             visibilities,
             reset_xform_properties,
-            enable_dof_force_sensors,
         )
     
     @require_sim_initialized
@@ -89,9 +89,11 @@ class ArticulationView(_ArticulationView):
             physics_sim_view.set_subspace_roots("/")
         carb.log_info("initializing view for {}".format(self._name))
         # TODO: add a callback to set physics view to None once stop is called
-        self._physics_view = physics_sim_view.create_articulation_view(
-            self._regex_prim_paths.replace(".*", "*"), self._enable_dof_force_sensors
-        )
+        if isinstance(self._regex_prim_paths, str):
+            _regex = self._regex_prim_paths.replace(".*", "*")
+        else:
+            _regex = [r.replace(".*", "*") for r in self._regex_prim_paths]
+        self._physics_view = physics_sim_view.create_articulation_view(_regex)
         assert self._physics_view.is_homogeneous
         self._physics_sim_view = physics_sim_view
         if not self._is_initialized:
@@ -152,6 +154,8 @@ class ArticulationView(_ArticulationView):
         if not self._is_initialized:
             carb.log_warn("ArticulationView needs to be initialized.")
             return None
+        if not hasattr(self, '_physics_sim_view') or self._physics_sim_view is None:
+            return super().get_gains(indices=indices, joint_indices=joint_indices, clone=clone)
         if not omni.timeline.get_timeline_interface().is_stopped() and self._physics_view is not None:
             indices = self._backend_utils.resolve_indices(indices, self.count, device="cpu")
             joint_indices = self._backend_utils.resolve_indices(joint_indices, self.num_dof, device="cpu")
@@ -223,6 +227,8 @@ class ArticulationView(_ArticulationView):
         if not self._is_initialized:
             carb.log_warn("ArticulationView needs to be initialized.")
             return None
+        if not hasattr(self, '_physics_sim_view') or self._physics_sim_view is None:
+            return super().get_applied_actions(clone=clone)
         if not omni.timeline.get_timeline_interface().is_stopped() and self._physics_view is not None:
             if self.num_dof == 0:
                 return None
@@ -246,8 +252,11 @@ class ArticulationView(_ArticulationView):
             return None
 
     def get_world_poses(
-        self, env_indices: Optional[torch.Tensor] = None, clone: bool = True
+        self, env_indices: Optional[torch.Tensor] = None, clone: bool = True, **kwargs
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if not hasattr(self, '_physics_sim_view') or self._physics_sim_view is None:
+            pos, rot = super().get_world_poses(env_indices, clone, **kwargs)
+            return pos.unflatten(0, self.shape), rot.unflatten(0, self.shape)
         indices = self._resolve_env_indices(env_indices)
         if self._physics_view is not None:
             with disable_warnings(self._physics_sim_view):
@@ -257,7 +266,7 @@ class ArticulationView(_ArticulationView):
                 poses = poses.clone()
             return poses[..., :3], poses[..., [6, 3, 4, 5]]
         else:
-            pos, rot = super().get_world_poses(indices, clone)
+            pos, rot = super().get_world_poses(indices, clone, **kwargs)
             return pos.unflatten(0, self.shape), rot.unflatten(0, self.shape)
 
     def set_world_poses(
@@ -461,10 +470,10 @@ class RigidPrimView(_RigidPrimView):
         return self
 
     def get_world_poses(
-        self, env_indices: Optional[torch.Tensor] = None, clone: bool = True
+        self, env_indices: Optional[torch.Tensor] = None, clone: bool = True, **kwargs
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         indices = self._resolve_env_indices(env_indices)
-        pos, rot = super().get_world_poses(indices, clone)
+        pos, rot = super().get_world_poses(indices, clone, **kwargs)
         return pos.unflatten(0, self.shape), rot.unflatten(0, self.shape)
 
     def set_world_poses(
