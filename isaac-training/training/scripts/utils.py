@@ -98,7 +98,7 @@ class Actor(nn.Module):
         super().__init__()
         self.actor_mean = nn.LazyLinear(action_dim)
         self.actor_std = nn.Parameter(torch.zeros(action_dim)) 
-    
+
     def forward(self, features: torch.Tensor):
         loc = self.actor_mean(features)
         scale = torch.exp(self.actor_std).expand_as(loc)
@@ -111,12 +111,10 @@ class BetaActor(nn.Module):
         self.beta_layer = nn.LazyLinear(action_dim)
         self.alpha_softplus = nn.Softplus()
         self.beta_softplus = nn.Softplus()
-    
+
     def forward(self, features: torch.Tensor):
         alpha = 1. + self.alpha_softplus(self.alpha_layer(features)) + 1e-6
         beta = 1. + self.beta_softplus(self.beta_layer(features)) + 1e-6
-        # print("alpha: ", alpha)
-        # print("beta: ", beta)
         return alpha, beta
 
 class GAE(nn.Module):
@@ -126,12 +124,12 @@ class GAE(nn.Module):
         self.register_buffer("lmbda", torch.tensor(lmbda))
         self.gamma: torch.Tensor
         self.lmbda: torch.Tensor
-    
+
     def forward(
-        self, 
-        reward: torch.Tensor, 
-        terminated: torch.Tensor, 
-        value: torch.Tensor, 
+        self,
+        reward: torch.Tensor,
+        terminated: torch.Tensor,
+        value: torch.Tensor,
         next_value: torch.Tensor
     ):
         num_steps = terminated.shape[1]
@@ -140,16 +138,16 @@ class GAE(nn.Module):
         gae = 0
         for step in reversed(range(num_steps)):
             delta = (
-                reward[:, step] 
-                + self.gamma * next_value[:, step] * not_done[:, step] 
+                reward[:, step]
+                + self.gamma * next_value[:, step] * not_done[:, step]
                 - value[:, step]
             )
-            advantages[:, step] = gae = delta + (self.gamma * self.lmbda * not_done[:, step] * gae) 
+            advantages[:, step] = gae = delta + (self.gamma * self.lmbda * not_done[:, step] * gae)
         returns = advantages + value
         return advantages, returns
 
 def make_batch(tensordict: TensorDict, num_minibatches: int):
-    tensordict = tensordict.reshape(-1) 
+    tensordict = tensordict.reshape(-1)
     perm = torch.randperm(
         (tensordict.shape[0] // num_minibatches) * num_minibatches,
         device=tensordict.device,
@@ -162,7 +160,7 @@ def evaluate(
     env,
     policy,
     cfg,
-    seed: int=0, 
+    seed: int=0,
     exploration_type: ExplorationType=ExplorationType.MEAN
 ):
 
@@ -171,7 +169,7 @@ def evaluate(
     env.set_seed(seed)
 
     render_callback = RenderCallback(interval=2)
-    
+
     with set_exploration_type(exploration_type):
         trajs = env.rollout(
             max_steps=env.max_episode_length,
@@ -181,11 +179,11 @@ def evaluate(
             break_when_any_done=False,
             return_contiguous=False,
         )
-    # base_env.enable_render(not cfg.headless)
+
     env.enable_render(not cfg.headless)
     env.reset()
-    
-    done = trajs.get(("next", "done")) 
+
+    done = trajs.get(("next", "done"))
     first_done = torch.argmax(done.long(), dim=1).cpu() # idx of first done will be return for each trajs
 
     def take_first_episode(tensor: torch.Tensor):
@@ -198,21 +196,20 @@ def evaluate(
     }
 
     info = {
-        "eval/stats." + k: torch.mean(v.float()).item() 
+        "eval/stats." + k: torch.mean(v.float()).item()
         for k, v in traj_stats.items()
     }
 
     # log video
     info["recording"] = wandb.Video(
-        render_callback.get_video_array(axes="t c h w"), 
-        fps=0.5 / (cfg.sim.dt * cfg.sim.substeps), 
+        render_callback.get_video_array(axes="t c h w"),
+        fps=0.5 / (cfg.sim.dt * cfg.sim.substeps),
         format="mp4"
     )
     env.train()
     # env.reset()
 
     return info
-
 
 def vec_to_new_frame(vec, goal_direction):
     if (len(vec.size()) == 1):
@@ -222,18 +219,18 @@ def vec_to_new_frame(vec, goal_direction):
     # goal direction x
     goal_direction_x = goal_direction / goal_direction.norm(dim=-1, keepdim=True)
     z_direction = torch.tensor([0, 0, 1.], device=vec.device)
-    
+
     # goal direction y
     goal_direction_y = torch.cross(z_direction.expand_as(goal_direction_x), goal_direction_x)
     goal_direction_y /= goal_direction_y.norm(dim=-1, keepdim=True)
-    
+
     # goal direction z
     goal_direction_z = torch.cross(goal_direction_x, goal_direction_y)
     goal_direction_z /= goal_direction_z.norm(dim=-1, keepdim=True)
 
     n = vec.size(0)
     if len(vec.size()) == 3:
-        vec_x_new = torch.bmm(vec.view(n, vec.shape[1], 3), goal_direction_x.view(n, 3, 1)) 
+        vec_x_new = torch.bmm(vec.view(n, vec.shape[1], 3), goal_direction_x.view(n, 3, 1))
         vec_y_new = torch.bmm(vec.view(n, vec.shape[1], 3), goal_direction_y.view(n, 3, 1))
         vec_z_new = torch.bmm(vec.view(n, vec.shape[1], 3), goal_direction_z.view(n, 3, 1))
     else:
@@ -248,7 +245,7 @@ def vec_to_new_frame(vec, goal_direction):
 
 def vec_to_world(vec, goal_direction):
     world_dir = torch.tensor([1., 0, 0], device=vec.device).expand_as(goal_direction)
-    
+
     # directional vector of world coordinate expressed in the local frame
     world_frame_new = vec_to_new_frame(world_dir, goal_direction)
 

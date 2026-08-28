@@ -6,8 +6,23 @@ from tensordict.nn import TensorDictModuleBase, TensorDictSequential, TensorDict
 from einops.layers.torch import Rearrange
 from torchrl.modules import ProbabilisticActor
 from torchrl.envs.transforms import CatTensors
-from utils import ValueNorm, make_mlp, IndependentNormal, Actor, GAE, make_batch, IndependentBeta, BetaActor, vec_to_world
+from pathlib import Path
+import importlib.util
 
+_UTILS_PATH = Path(__file__).resolve().parent / "utils.py"
+_spec = importlib.util.spec_from_file_location("navrl_utils", str(_UTILS_PATH))
+_navrl_utils = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_navrl_utils)
+
+ValueNorm = _navrl_utils.ValueNorm
+make_mlp = _navrl_utils.make_mlp
+IndependentNormal = _navrl_utils.IndependentNormal
+Actor = _navrl_utils.Actor
+GAE = _navrl_utils.GAE
+make_batch = _navrl_utils.make_batch
+IndependentBeta = _navrl_utils.IndependentBeta
+BetaActor = _navrl_utils.BetaActor
+vec_to_world = _navrl_utils.vec_to_world
 
 
 class PPO(TensorDictModuleBase):
@@ -16,16 +31,15 @@ class PPO(TensorDictModuleBase):
         self.cfg = cfg
         self.device = device
 
-        
         # Feature extractor for LiDAR
         feature_extractor_network = nn.Sequential(
-            nn.LazyConv2d(out_channels=4, kernel_size=[5, 3], padding=[2, 1]), nn.ELU(), 
+            nn.LazyConv2d(out_channels=4, kernel_size=[5, 3], padding=[2, 1]), nn.ELU(),
             nn.LazyConv2d(out_channels=16, kernel_size=[5, 3], stride=[2, 1], padding=[2, 1]), nn.ELU(),
             nn.LazyConv2d(out_channels=16, kernel_size=[5, 3], stride=[2, 2], padding=[2, 1]), nn.ELU(),
             Rearrange("n c w h -> n (c w h)"),
             nn.LazyLinear(128), nn.LayerNorm(128),
         ).to(self.device)
-        
+
         # Dynamic obstacle information extractor
         dynamic_obstacle_network = nn.Sequential(
             Rearrange("n c w h -> n (c w h)"),
@@ -40,19 +54,30 @@ class PPO(TensorDictModuleBase):
             TensorDictModule(make_mlp([256, 256]), ["_feature"], ["_feature"]),
         ).to(self.device)
 
-        # Actor etwork
-        self.n_agents, self.action_dim = action_spec.shape
+        # Actor network
+        if len(action_spec.shape) >= 2:
+            self.n_agents, self.action_dim = action_spec.shape[-2], action_spec.shape[-1]
+        else:
+            # Walk the CompositeSpec to get the inner action's last dim
+            try:
+                inner = action_spec["agents", "action"]
+                self.n_agents = 1
+                self.action_dim = inner.shape[-1]
+            except (KeyError, TypeError):
+                # Fallback: use last dim of outer spec
+                self.n_agents = 1
+                self.action_dim = action_spec.shape[-1] if action_spec.shape else 4
         self.actor = ProbabilisticActor(
             TensorDictModule(BetaActor(self.action_dim), ["_feature"], ["alpha", "beta"]),
             in_keys=["alpha", "beta"],
-            out_keys=[("agents", "action_normalized")], 
+            out_keys=[("agents", "action_normalized")],
             distribution_class=IndependentBeta,
             return_log_prob=True
         ).to(self.device)
 
         # Critic network
         self.critic = TensorDictModule(
-            nn.LazyLinear(1), ["_feature"], ["state_value"] 
+            nn.LazyLinear(1), ["_feature"], ["state_value"]
         ).to(self.device)
         self.value_norm = ValueNorm(1).to(self.device)
 
@@ -121,11 +146,11 @@ class PPO(TensorDictModuleBase):
             for minibatch in batch:
                 infos.append(self._update(minibatch))
         infos = torch.stack(infos).to_tensordict()
-        
-        infos = infos.apply(torch.mean, batch_size=[])
-        return {k: v.item() for k, v in infos.items()}    
 
-    
+        infos = infos.apply(torch.mean, batch_size=[])
+        return {k: v.item() for k, v in infos.items()}
+
+
     def _update(self, tensordict): # tensordict shape (batch_size, )
         self.feature_extractor(tensordict)
 
@@ -142,12 +167,12 @@ class PPO(TensorDictModuleBase):
         ratio = torch.exp(log_probs - tensordict["sample_log_prob"]).unsqueeze(-1)
         surr1 = advantage * ratio
         surr2 = advantage * ratio.clamp(1.-self.cfg.actor.clip_ratio, 1.+self.cfg.actor.clip_ratio)
-        actor_loss = -torch.mean(torch.min(surr1, surr2)) * self.action_dim 
+        actor_loss = -torch.mean(torch.min(surr1, surr2)) * self.action_dim
 
-        # Critic Loss 
+        # Critic Loss
         b_value = tensordict["state_value"]
         ret = tensordict["ret"] # Return G
-        value = self.critic(tensordict)["state_value"] 
+        value = self.critic(tensordict)["state_value"]
         value_clipped = b_value + (value - b_value).clamp(-self.cfg.critic.clip_ratio, self.cfg.critic.clip_ratio) # this guarantee that critic update is clamped
         critic_loss_clipped = self.critic_loss_fn(ret, value_clipped)
         critic_loss_original = self.critic_loss_fn(ret, value)
