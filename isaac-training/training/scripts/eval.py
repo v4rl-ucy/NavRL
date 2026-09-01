@@ -1292,6 +1292,50 @@ def main(cfg):
         print(f"[ROS-TEST] Failed to create /clock publisher: {repr(e)}", flush=True)
 
     # -----------------------------------------------------------------
+    # Static Transform ROS2 Publishers
+    # -----------------------------------------------------------------
+    try:
+        import omni.graph.core as og
+        from omni.isaac.core.utils.extensions import enable_extension
+        import omni.timeline
+
+        enable_extension("isaacsim.ros2.bridge")
+
+        og.Controller.edit(
+        {"graph_path": "/ActionGraph_StaticTransform", "evaluator_name": "execution"},
+        {
+            og.Controller.Keys.CREATE_NODES: [
+                ("OnPlaybackTick", "omni.graph.action.OnPlaybackTick"),
+                ("PublishRawTransformTree_slam_physx_lidar", "isaacsim.ros2.bridge.ROS2PublishRawTransformTree"),
+                ("PublishRawTransformTree_base_link", "isaacsim.ros2.bridge.ROS2PublishRawTransformTree"),
+            ],
+            og.Controller.Keys.SET_VALUES: [
+                ("PublishRawTransformTree_slam_physx_lidar.inputs:childFrameId", "slam_physx_lidar"),
+                ("PublishRawTransformTree_slam_physx_lidar.inputs:parentFrameId", "ellipselio/base_link"),
+                ("PublishRawTransformTree_slam_physx_lidar.inputs:rotation", [0.0, 0.0, 0.0, 1.0]),
+                ("PublishRawTransformTree_slam_physx_lidar.inputs:translation", [0.0, 0.0, 0.0]),
+                ("PublishRawTransformTree_slam_physx_lidar.inputs:staticPublisher", True),
+                ("PublishRawTransformTree_slam_physx_lidar.inputs:topicName", "tf_static"),
+
+                ("PublishRawTransformTree_base_link.inputs:childFrameId", "ellipselio/base_link"),
+                ("PublishRawTransformTree_base_link.inputs:parentFrameId", "ellipselio/imu_prop"),
+                ("PublishRawTransformTree_base_link.inputs:rotation", [0.0, 0.0, 0.0, 1.0]),
+                ("PublishRawTransformTree_base_link.inputs:translation", [0.0, 0.0, 0.0]),
+                ("PublishRawTransformTree_base_link.inputs:staticPublisher", True),
+                ("PublishRawTransformTree_base_link.inputs:topicName", "tf_static"),
+            ],
+            og.Controller.Keys.CONNECT: [
+                ("OnPlaybackTick.outputs:tick", "PublishRawTransformTree_slam_physx_lidar.inputs:execIn"),
+                ("OnPlaybackTick.outputs:tick", "PublishRawTransformTree_base_link.inputs:execIn"),
+            ],
+        },
+        )
+        omni.timeline.get_timeline_interface().play()
+        print("[ROS-TEST] Created /tf_static publisher graph", flush=True)
+    except Exception as e:
+        print(f"[ROS-TEST] Failed to create /tf_static publisher: {repr(e)}", flush=True)
+
+    # -----------------------------------------------------------------
     # SLAM PhysX SDK LiDAR ROS2 publisher
     # -----------------------------------------------------------------
     ENABLE_SLAM_PHYSX_LIDAR = True
