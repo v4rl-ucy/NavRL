@@ -74,7 +74,7 @@ def main(cfg):
         "enable_motion_bvh": True,
     })
 
-
+    
     import carb
 
     carb.settings.get_settings().set_int("/rtx/debugMaterialType", 0)
@@ -84,7 +84,7 @@ def main(cfg):
     settings.set("/rtx/rendermode", "MinimalRendering")
     settings.set_int("/rtx/minimal/mode", 1)
     settings.set_float("/rtx/sceneDb/ambientLightIntensity", 0.5)
-
+    
     # =========================================================================
     # Enable required extensions
     # These were disabled by default in Isaac Sim 5.1 but are needed by
@@ -534,9 +534,35 @@ def main(cfg):
             self._holding_last_state = None
 
         def __call__(self, tensordict):
-            # PPO writes the world-frame velocity command to:
-            # ("agents", "action")
+            # PPO writes the desired velocity command in the EllipseLIO odom frame.
             tensordict = self.base_policy(tensordict)
+
+            action = tensordict[("agents", "action")]
+
+            # Convert desired velocity from EllipseLIO odom frame
+            # to Isaac world frame before VelController / Lee sees it.
+            if getattr(self.env, "world_to_odom", None) is not None:
+                world_to_odom_rot = self.env.world_to_odom[0:3, 0:3]
+
+                # For a rotation matrix:
+                # R_world_from_odom = R_odom_from_world^T
+                odom_to_world_rot = world_to_odom_rot.T
+
+                odom_to_world_rot = torch.as_tensor(
+                    odom_to_world_rot,
+                    dtype=action.dtype,
+                    device=action.device,
+                )
+
+                action_world = torch.matmul(
+                    odom_to_world_rot,
+                    action.unsqueeze(-1),
+                ).squeeze(-1)
+
+                tensordict.set(
+                    ("agents", "action"),
+                    action_world,
+                )
 
             navigation_ready = bool(
                 getattr(self.env, "navigation_ready", False)
@@ -545,7 +571,7 @@ def main(cfg):
             if not navigation_ready:
                 action = tensordict[("agents", "action")]
 
-                # Zero desired world-frame velocity.
+                # Zero desired Isaac-world velocity.
                 # VelController will turn this into gravity-compensating
                 # rotor commands for zero-velocity position hold.
                 tensordict.set(
@@ -571,7 +597,6 @@ def main(cfg):
                 self._holding_last_state = navigation_ready
 
             return tensordict
-
 
     def quat_to_transform(x, y, z, qx, qy, qz, qw):
             # Quaternion normalization
@@ -749,9 +774,6 @@ def main(cfg):
         _prof_lidar1 = time.perf_counter()
         self._profile_acc["policy_lidar_update"] += (_prof_lidar1 - _prof_lidar0)
 
-        # Keep target direction current for NavRL observations
-        self.target_dir[:] = self.target_pos - self.root_state[..., :3]
-
         # Publish simulated IMU at sim-step rate
         _prof_imu0 = time.perf_counter()
         if hasattr(self, "navrl_imu_sensor") and hasattr(self, "navrl_imu_pub"):
@@ -839,10 +861,13 @@ def main(cfg):
             qz = self.latest_lio_odom.pose.pose.orientation.z
             qw = self.latest_lio_odom.pose.pose.orientation.w
 
-            t_odom_from_lidar = quat_to_transform(x_odom, y_odom, z_odom, qx, qy, qz, qw)
+            self.lio_orientation = [qx, qy, qz, qw]
+            self.lio_velocity = self.latest_lio_odom.twist.twist
+
+            self.t_odom_from_lidar = quat_to_transform(x_odom, y_odom, z_odom, qx, qy, qz, qw)
 
             # Calculate the target in the odometry frame once
-            if self.target_in_odom is None:
+            if not self.target_initialized:
                 # Assuming that the lidar is aligned with baselink
                 # .......... Change an use transforms when publishers are implemented ..........
 
@@ -868,7 +893,7 @@ def main(cfg):
 
 
                 # 1.3 World to odom calculation
-                self.world_to_odom = np.matmul(t_odom_from_lidar, np.linalg.inv(t_world_from_lidar))
+                self.world_to_odom = np.matmul(self.t_odom_from_lidar, np.linalg.inv(t_world_from_lidar))
 
                 # ------------------------------------------------------------------
                 # Step 2: Calculate target in Odom frame
@@ -881,12 +906,17 @@ def main(cfg):
                 # Target in Odom frame
                 self.target_in_odom = np.matmul(self.world_to_odom, target_in_world)
 
+                # Initial drone position for fixed target frame
+                self.initial_drone_pos = np.array([x_odom, y_odom, z_odom], dtype=np.float64)
+                self.target_dir = self.target_in_odom[:3] - self.initial_drone_pos
+
+                self.target_initialized = True
             # Calculate the vector from drone to target
-            drone_in_odom = np.array([x_odom, y_odom, z_odom], dtype=np.float64)
+            self.drone_in_odom = np.array([x_odom, y_odom, z_odom], dtype=np.float64)
 
             v_drone_to_target = (
                 self.target_in_odom[:3]
-                - drone_in_odom
+                - self.drone_in_odom
             )
 
             goal_heading = math.atan2(
@@ -906,7 +936,7 @@ def main(cfg):
 
             # Align the grid
             self.aligned_grid = np.matmul(self.collision_check_grid, np.transpose(rot_goal))
-            self.aligned_grid += drone_in_odom
+            self.aligned_grid += self.drone_in_odom
 
             # ---------------------------------------------
             # Step 3. populate service call
@@ -1149,15 +1179,22 @@ def main(cfg):
             z = self._env_z_min + (self._env_z_max - self._env_z_min) * torch.rand(
                 env_ids.size(0), device=self.device
             )
-
+            
             self.target_pos[env_ids, 0, 0] = x
             self.target_pos[env_ids, 0, 1] = y
             self.target_pos[env_ids, 0, 2] = z
+            '''
+            # Test
+            self.target_pos[env_ids, 0, 0] = 2.737997915929534
+            self.target_pos[env_ids, 0, 1] = 26.74155297761493
+            self.target_pos[env_ids, 0, 2] = 1.4282457520308882
+            '''
         else:
             _original_reset_target(self, env_ids)
 
 
     def _patched_reset_idx(self, env_ids):
+        print("[RESET] Resetting drone position.", flush=True)
         self.drone._reset_idx(env_ids, self.training)
         self.reset_target(env_ids)
 
@@ -1178,7 +1215,7 @@ def main(cfg):
         else:
             return _original_reset_idx(self, env_ids)
 
-        self.target_dir[env_ids] = self.target_pos[env_ids] - pos
+        #self.target_dir[env_ids] = self.target_pos[env_ids] - pos
 
         rpy = torch.zeros(len(env_ids), 1, 3, device=self.device)
         diff = self.target_pos[env_ids] - pos
@@ -1734,7 +1771,6 @@ def main(cfg):
         # To align the grid to the target, we need to get
         # a pose estimate from ellipselio. Until then,
         # the state is set to uninitialised.
-
         env.lio_odom_received = False
         env.navigation_ready = False
         env.client_activated = False
@@ -1742,7 +1778,16 @@ def main(cfg):
 
         # Initializing placeholders for alignment
         env.world_to_odom = None
-        env.target_in_odom = None
+        env.drone_in_odom = None
+        env.target_in_odom = np.zeros(4, dtype=np.float64)
+        env.target_dir = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        env.initial_drone_pos = np.zeros(3, dtype=np.float64)
+        env.target_initialized = False
+        env.t_odom_from_lidar = np.eye(4, dtype=np.float64)
+
+        # Initializing placeholders for LIO odom
+        env.lio_orientation = None
+        env.lio_velocity = None
 
         env.goal_aligned_collision_check_grid = np.zeros_like(
                 env.collision_check_grid,
@@ -1955,6 +2000,7 @@ def main(cfg):
 
     # Use the same evaluation approach as eval.py — SyncDataCollector
     # runs the policy in the environment for a fixed number of steps
+    '''
     collector = SyncDataCollector(
         transformed_env,
         policy=policy,
@@ -1964,8 +2010,9 @@ def main(cfg):
         return_same_td=True,
         exploration_type=ExplorationType.MEAN,  # Deterministic eval
     )
-    # Used when hovering is needed
     '''
+    # Used when hovering is needed
+
     collector = SyncDataCollector(
         transformed_env,
         policy=gated_policy,
@@ -1982,7 +2029,7 @@ def main(cfg):
         return_same_td=True,
         exploration_type=ExplorationType.MEAN,
     )
-    '''
+    
     print("[EVAL] Running policy... (Ctrl+C to stop)")
     try:
         _last_eval_wall_t = time.perf_counter()

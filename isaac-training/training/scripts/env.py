@@ -400,7 +400,7 @@ class NavigationEnv(IsaacEnv):
             pos[:, 0, 2] = 2.
 
         # Coordinate change: after reset, the drone's target direction should be changed
-        self.target_dir[env_ids] = self.target_pos[env_ids] - pos
+        self.target_dir[env_ids] = self.target_in_odom[:3] - self.initial_drone_pos
 
         # Coordinate change: after reset, the drone's facing direction should face the current goal
         rpy = torch.zeros(len(env_ids), 1, 3, device=self.device)
@@ -436,64 +436,53 @@ class NavigationEnv(IsaacEnv):
         # Policy observation state starts as GT
         self.root_state = gt_root_state.clone()
 
-        # Replace only NavRL observation x/y and vx/vy with aligned EllipseLIO
+        # Replace NavRL observation and odometry with aligned EllipseLIO
         if (
-            getattr(self, "_use_lio_for_navrl_obs", False)
-            and getattr(self, "_lio_alignment_ready", False)
+            getattr(self, "lio_odom_received", False)
             and getattr(self, "latest_lio_odom", None) is not None
         ):
             try:
-                import numpy as _np
+                # LIO position
+                self.root_state[..., 0] = self.drone_in_odom[0]
+                self.root_state[..., 1] = self.drone_in_odom[1]
+                self.root_state[..., 2] = self.drone_in_odom[2]
 
-                odom = self.latest_lio_odom
-                p = odom.pose.pose.position
-                v = odom.twist.twist.linear
+                # LIO Orientation
+                self.root_state[..., 3] = self.lio_orientation[3]
+                self.root_state[..., 4] = self.lio_orientation[0]
+                self.root_state[..., 5] = self.lio_orientation[1]
+                self.root_state[..., 6] = self.lio_orientation[2]
 
-                R = self._lio_align_R
+                # LIO  Linear velocity
+                vx = self.lio_velocity.linear.x
+                vy = self.lio_velocity.linear.y
+                vz = self.lio_velocity.linear.z
 
-                lio_xy = _np.array([p.x, p.y], dtype=float)
-                lio0_xy = self._lio0_for_lio_check[:2]
-                gt0_xy = self._gt0_for_lio_check[:2]
+                lin_vel = np.array([vx, vy, vz])
 
-                lio_rel_xy = lio_xy - lio0_xy
-                aligned_xy = R @ lio_rel_xy + gt0_xy
+                # LIO Angular velocity
+                wx = self.lio_velocity.angular.x
+                wy = self.lio_velocity.angular.y
+                wz = self.lio_velocity.angular.z
 
-                q = odom.pose.pose.orientation
+                ang_vel = np.array([wx, wy, wz])
 
-                q_lio = _np.array([q.x, q.y, q.z, q.w], dtype=float)
+                # Align velocities to Odom Frame -- Assumption: body->lidar tf is identity
+                body_to_odom_rot = self.t_odom_from_lidar[0:3, 0:3] # no translation
 
-                def quat_xyzw_to_R(q):
-                    x, y, z, w = q
-                    return _np.array([
-                        [1 - 2*(y*y + z*z), 2*(x*y - z*w),     2*(x*z + y*w)],
-                        [2*(x*y + z*w),     1 - 2*(x*x + z*z), 2*(y*z - x*w)],
-                        [2*(x*z - y*w),     2*(y*z + x*w),     1 - 2*(x*x + y*y)],
-                    ], dtype=float)
+                lin_vel_in_odom = np.matmul(body_to_odom_rot, lin_vel)
+                ang_vel_in_odom = np.matmul(body_to_odom_rot, ang_vel)
 
-                R_lio_body = quat_xyzw_to_R(q_lio)
+                # Assign to state
+                self.root_state[..., 7] = lin_vel_in_odom[0]
+                self.root_state[..., 8] = lin_vel_in_odom[1]
+                self.root_state[..., 9] = lin_vel_in_odom[2]
 
-                v_body = _np.array([v.x, v.y, v.z], dtype=float)
-                v_lio_odom = R_lio_body @ v_body
-
-                aligned_vel_xy = R @ v_lio_odom[:2]
-
-                self.root_state[0, 0, 0] = float(aligned_xy[0])
-                self.root_state[0, 0, 1] = float(aligned_xy[1])
-
-                # Keep GT z for now; LIO z was not reliable enough yet
-                self.root_state[0, 0, 7] = float(aligned_vel_xy[0])
-                self.root_state[0, 0, 8] = float(aligned_vel_xy[1])
-
-                # Controller also gets LIO x/y and vx/vy
-                ctrl_state = gt_root_state[..., :13].clone()
-                ctrl_state[0, 0, 0] = float(aligned_xy[0])
-                ctrl_state[0, 0, 1] = float(aligned_xy[1])
-                ctrl_state[0, 0, 7] = float(aligned_vel_xy[0])
-                ctrl_state[0, 0, 8] = float(aligned_vel_xy[1])
-                self.info["drone_state"][:] = ctrl_state
-
+                self.root_state[..., 10] = ang_vel_in_odom[0]
+                self.root_state[..., 11] = ang_vel_in_odom[1]
+                self.root_state[..., 12] = ang_vel_in_odom[2]
             except Exception as e:
-                print(f"[LIO-OBS] failed to inject LIO state: {repr(e)}", flush=True)
+                print(f"[ODOM-DEBUG] Could not use LIO for odometry: {repr(e)}", flush=True)
 
         # >>>>>>>>>>>>The relevant code starts from here<<<<<<<<<<<<
         # -----------Network Input I: LiDAR range data--------------
@@ -618,13 +607,22 @@ class NavigationEnv(IsaacEnv):
 
         # ---------Network Input II: Drone's internal states---------
         # a. distance info in horizontal and vertical plane
-        rpos = self.target_pos - self.root_state[..., :3]
+        target_in_odom_torch = torch.as_tensor(
+            self.target_in_odom[:3],
+            dtype=self.root_state.dtype,
+            device=self.root_state.device,
+        )
+        rpos = target_in_odom_torch - self.root_state[..., :3]
         distance = rpos.norm(dim=-1, keepdim=True) # start to goal distance
         distance_2d = rpos[..., :2].norm(dim=-1, keepdim=True)
         distance_z = rpos[..., 2].unsqueeze(-1)
 
         # b. unit direction vector to goal
-        target_dir_2d = self.target_dir.clone()
+        target_dir_2d = torch.as_tensor(
+            self.target_dir,
+            dtype=self.root_state.dtype,
+            device=self.root_state.device,
+        ).view(1, 1, 3).clone()
         target_dir_2d[..., 2] = 0
 
         rpos_clipped = rpos / distance.clamp(1e-6) # unit vector: start to goal direction
