@@ -1,7 +1,9 @@
 navigation_node:
   ros__parameters:
     vel_limit: 1.0
-    odom_topic: /unitree_go2/odom
+    odom_topic: /ellipselio/odom
     cmd_topic: /unitree_go2/cmd_vel
     checkpoint_file: navrl_checkpoint.pt
     visualize_raycast: false
+    raycast_backend: ellipselio
+    collision_service: /ellipselio/batch_check_collision

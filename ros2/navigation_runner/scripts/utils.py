@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from typing import Iterable, Union
 from tensordict.tensordict import TensorDict
+import numpy as np
 
 class ValueNorm(nn.Module):
     def __init__(
@@ -205,4 +206,125 @@ def construct_input(start, end):
 
 def add_tuple(old_tuple, new_tuple):
     return old_tuple + (new_tuple, )
+
+def build_angular_mapping(
+    source_h_count,
+    source_v_count,
+    source_h_fov,
+    source_v_min,
+    source_v_max,
+    target_h_count,
+    target_v_count,
+    target_h_fov,
+    target_v_min,
+    target_v_max,
+):
+    """
+    Build a mapping from each target ray to the four surrounding
+    source rays.
+
+    All angular arguments are in radians.
+
+    Returns:
+        h_mapping: list of (h_left, h_right)
+        v_mapping: list of (v_lower, v_upper)
+    """
+
+    # Source horizontal angles.
+    # For a full 360-degree scan, endpoint=False avoids duplicating
+    # the 0 / 2*pi direction.
+    source_h_angles = np.linspace(
+        0.0,
+        source_h_fov,
+        source_h_count,
+        endpoint=False,
+    )
+
+    # Target horizontal angles.
+    target_h_angles = np.linspace(
+        0.0,
+        target_h_fov,
+        target_h_count,
+        endpoint=False,
+    )
+
+    # Vertical angles include both endpoints.
+    source_v_angles = np.linspace(
+        source_v_min,
+        source_v_max,
+        source_v_count,
+    )
+
+    target_v_angles = np.linspace(
+        target_v_min,
+        target_v_max,
+        target_v_count,
+    )
+
+    # ------------------------------------------------------------
+    # Horizontal mapping
+    # ------------------------------------------------------------
+    h_mapping = []
+
+    for target_angle in target_h_angles:
+        # Normalize into source horizontal interval.
+        target_angle = target_angle % source_h_fov
+
+        h_right = np.searchsorted(
+            source_h_angles,
+            target_angle,
+            side="left",
+        )
+
+        # Horizontal directions wrap around.
+        h_right %= source_h_count
+        h_left = (h_right - 1) % source_h_count
+
+        # If target exactly equals an existing source ray,
+        # use that ray for both sides.
+        if np.isclose(
+            source_h_angles[h_right],
+            target_angle,
+            atol=1e-8,
+        ):
+            h_left = h_right
+
+        h_mapping.append((h_left, h_right))
+
+    # ------------------------------------------------------------
+    # Vertical mapping
+    # ------------------------------------------------------------
+    v_mapping = []
+
+    for target_angle in target_v_angles:
+        v_upper = np.searchsorted(
+            source_v_angles,
+            target_angle,
+            side="left",
+        )
+
+        # Target below source vertical FOV.
+        if v_upper == 0:
+            v_lower = 0
+            v_upper = 0
+
+        # Target above source vertical FOV.
+        elif v_upper >= source_v_count:
+            v_lower = source_v_count - 1
+            v_upper = source_v_count - 1
+
+        else:
+            v_lower = v_upper - 1
+
+            # Exact match.
+            if np.isclose(
+                source_v_angles[v_upper],
+                target_angle,
+                atol=1e-8,
+            ):
+                v_lower = v_upper
+
+        v_mapping.append((v_lower, v_upper))
+
+    return h_mapping, v_mapping
 

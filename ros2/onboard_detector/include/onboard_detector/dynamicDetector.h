@@ -7,12 +7,18 @@
 #define ONBOARDDETECTOR_DYNAMICDETECTOR_H
 
 #include <rclcpp/rclcpp.hpp>
+
+// Timer Test
+#include <builtin_interfaces/msg/time.hpp>
+#include <chrono>
+#include <stdexcept>
+
 #include <eigen3/Eigen/Eigen>
 #include <visualization_msgs/msg/marker_array.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <nav_msgs/msg/odometry.hpp>
-#include <cv_bridge/cv_bridge.h>
+#include <cv_bridge/cv_bridge.hpp>
 #include <vision_msgs/msg/detection2_d_array.hpp>
 #include <onboard_detector/srv/get_dynamic_obstacles.hpp>
 #include <pcl/point_cloud.h>
@@ -62,10 +68,15 @@ namespace onboardDetector{
         rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr filteredPointsPub_;
         rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr dynamicPointsPub_;
 
+        // Timer test
         // Timer
+        /*
         rclcpp::TimerBase::SharedPtr detectionTimer_;
         rclcpp::TimerBase::SharedPtr trackingTimer_;
         rclcpp::TimerBase::SharedPtr classificationTimer_;
+        rclcpp::TimerBase::SharedPtr visTimer_;
+        */
+        // Timer
         rclcpp::TimerBase::SharedPtr visTimer_;
 
         //Server
@@ -92,8 +103,16 @@ namespace onboardDetector{
 
         // DETECTOR PARAM
         double dt_;
+        std::string timeSource_; // Timer test
         double raycastMaxLength_;
         double boxIOUThresh_;
+
+        // Timer test - added block
+        // TIMING STATE
+        rclcpp::Time lastMessageStamp_;
+        std::chrono::steady_clock::time_point lastSteadyStamp_;
+        bool hasLastMessageStamp_ = false;
+        bool hasLastSteadyStamp_ = false;
 
         // DBSCAN
         double groundHeight_;
@@ -126,6 +145,11 @@ namespace onboardDetector{
         int forceDynaCheckRange_;
         int dynamicConsistThresh_;
         
+
+        // TEST
+        uint64_t detectionSeq_ = 0;
+        uint64_t trackedDetectionSeq_ = 0;
+
         // SIZE CONSTRAINT
         bool constrainSize_;
         std::vector<Eigen::Vector3d> targetObjectSize_; 
@@ -197,11 +221,16 @@ namespace onboardDetector{
         void depthOdomCB(const sensor_msgs::msg::Image::ConstSharedPtr& img, const nav_msgs::msg::Odometry::ConstSharedPtr& odom);
         void colorImgCB(const sensor_msgs::msg::Image::ConstSharedPtr& img);
         void yoloDetectionCB(const vision_msgs::msg::Detection2DArray::ConstSharedPtr& detections);
+
+        // Timer test
+        void processNewObservation(
+            const builtin_interfaces::msg::Time& messageStamp);
+
         void detectionCB();
         void trackingCB();
         void classificationCB();
         void visCB();
-
+        
         // detection function
         void dbscanDetect();
         void uvDetect();

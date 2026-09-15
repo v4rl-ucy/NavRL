@@ -12,6 +12,7 @@ from omni.isaac.orbit.terrains import TerrainImporterCfg, TerrainImporter, Terra
 from omni_drones.utils.torch import euler_to_quaternion, quat_axis
 from omni.isaac.orbit.sensors import RayCaster, RayCasterCfg, patterns
 from omni.isaac.core.utils.viewports import set_camera_view
+from pxr import UsdGeom, Gf # Camera Test
 
 from pathlib import Path
 import importlib.util
@@ -42,6 +43,10 @@ class NavigationEnv(IsaacEnv):
 
     def __init__(self, cfg):
         print("[Navigation Environment]: Initializing Env...")
+        # Camera test
+        print("[Navigation Environment]: Initializing Env...")
+        self.camera_path = "/World/envs/env_0/Hummingbird_0/base_link/front_camera"
+
         # LiDAR params:
         self.lidar_range = cfg.sensor.lidar_range
         self.lidar_vfov = (max(-89., cfg.sensor.lidar_vfov[0]), min(89., cfg.sensor.lidar_vfov[1]))
@@ -88,6 +93,32 @@ class NavigationEnv(IsaacEnv):
         self.drone = drone_model(cfg=cfg)
         # drone_prim = self.drone.spawn(translations=[(0.0, 0.0, 1.0)])[0]
         drone_prim = self.drone.spawn(translations=[(0.0, 0.0, 2.0)])[0]
+        
+        # Camera test
+        # Forward-facing RGB-D camera
+        stage = prim_utils.get_current_stage()
+
+        camera_path = self.camera_path
+
+        camera = UsdGeom.Camera.Define(stage, camera_path)
+
+        xform = UsdGeom.Xformable(camera.GetPrim())
+
+        # 10 cm forward, 8 cm below body origin
+        xform.AddTranslateOp().Set(
+            Gf.Vec3d(0.10, 0.0, -0.08)
+        )
+
+        # USD camera looks along -Z.
+        # Rotate so camera -Z points along drone +X,
+        # while camera +Y remains drone +Z.
+        xform.AddRotateYOp().Set(90.0)
+
+        camera.CreateFocalLengthAttr(18.0)
+        camera.CreateHorizontalApertureAttr(36.0)
+        camera.CreateVerticalApertureAttr(27.0)
+
+        self.camera_path = camera_path
 
         # lighting
         light = AssetBaseCfg(
@@ -255,6 +286,51 @@ class NavigationEnv(IsaacEnv):
 
 
     def move_dynamic_obstacle(self):
+        # TEMP: deterministic back-and-forth test trajectory
+        speed = 2.0
+        i = 0
+
+        # Keep obstacle on the test line
+        self.dyn_obs_state[i, 0] = -2.0
+        self.dyn_obs_state[i, 2] = 0.0
+
+        # Initial direction: move toward y = 4
+        if self.dyn_obs_step_count == 0:
+            self.dyn_obs_vel[i, :] = 0.0
+            self.dyn_obs_vel[i, 1] = speed
+        '''
+        # Reverse at endpoints
+        self.dyn_obs_vel[self.dyn_obs_state[i, 1] >= 4.0, 1] = -speed
+        self.dyn_obs_vel[self.dyn_obs_state[i, 1] <= -2.0, 1] = speed
+        '''
+
+        # Reverse at endpoints
+        if self.dyn_obs_state[i, 1] >= 4.0:
+            self.dyn_obs_vel[i, 1] = -speed
+
+        if self.dyn_obs_state[i, 1] <= -2.0:
+            self.dyn_obs_vel[i, 1] = speed
+
+        # Integrate position
+        self.dyn_obs_state[i, :3] += self.dyn_obs_vel[i] * self.cfg.sim.dt
+
+        # Keep extras still
+        self.dyn_obs_vel[1:, :] = 0.0
+
+        # Write state to Isaac
+        for category_idx, dynamic_obstacle in enumerate(self.dyn_obs_list):
+            dynamic_obstacle.write_root_state_to_sim(
+                self.dyn_obs_state[
+                    category_idx*self.dyn_obs_num_of_each_category:
+                    (category_idx+1)*self.dyn_obs_num_of_each_category
+                ]
+            )
+            dynamic_obstacle.write_data_to_sim()
+            dynamic_obstacle.update(self.cfg.sim.dt)
+
+        self.dyn_obs_step_count += 1
+        return
+
         # Step 1: Random sample new goals for required update dynamic obstacles
         # Check whether the current dynamic obstacles need new goals
         dyn_obs_goal_dist = torch.sqrt(torch.sum((self.dyn_obs_state[:, :3] - self.dyn_obs_goal)**2, dim=1)) if self.dyn_obs_step_count !=0 \
@@ -742,6 +818,17 @@ class NavigationEnv(IsaacEnv):
 
         self.terminated = below_bound | above_bound | collision
         self.truncated = (self.progress_buf >= self.max_episode_length).unsqueeze(-1) # progress buf is to track the step number
+
+        # DEBUG
+        if self.terminated.any():
+            print(
+                "[DONE-DEBUG]",
+                "static_collision=", static_collision.detach().cpu().numpy(),
+                "dynamic_collision=", dynamic_collision.detach().cpu().numpy(),
+                "below_bound=", below_bound.detach().cpu().numpy(),
+                "above_bound=", above_bound.detach().cpu().numpy(),
+                flush=True,
+            )
 
         # update previous velocity for smoothness calculation in the next ieteration
         self.prev_drone_vel_w = self.drone.vel_w[..., :3].clone()

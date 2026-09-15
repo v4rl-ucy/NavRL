@@ -138,6 +138,9 @@ def main(cfg):
     from omni_drones.utils.torchrl import SyncDataCollector
     from torchrl.envs.transforms import TransformedEnv, Compose
     from torchrl.envs.utils import ExplorationType, set_exploration_type
+    # Yaw test - add
+    from torchrl.data import UnboundedContinuousTensorSpec
+
     import omni.isaac.core.utils.prims as prim_utils
     import omni.isaac.orbit.sim as sim_utils
     from omni.isaac.orbit.assets import AssetBaseCfg
@@ -636,9 +639,13 @@ def main(cfg):
             self.env = env
 
         def __call__(self, tensordict):
+            # Translational velocity commanded in EllipseLIO odom frame.
             action = self.env.latest_cmd_vel.clone()
 
+            target_yaw_odom = self.env.latest_target_yaw
+
             if getattr(self.env, "world_to_odom", None) is not None:
+                # Rotation from EllipseLIO odom -> Isaac world.
                 odom_to_world_rot = self.env.world_to_odom[0:3, 0:3].T
 
                 odom_to_world_rot = torch.as_tensor(
@@ -647,10 +654,47 @@ def main(cfg):
                     device=action.device,
                 )
 
+                # Transform commanded velocity into Isaac world.
                 action = torch.matmul(
                     odom_to_world_rot,
                     action.unsqueeze(-1),
                 ).squeeze(-1)
+
+                # Represent the desired odom yaw as a heading vector.
+                heading_odom = torch.cat(
+                    [
+                        torch.cos(target_yaw_odom),
+                        torch.sin(target_yaw_odom),
+                        torch.zeros_like(target_yaw_odom),
+                    ],
+                    dim=-1,
+                )
+
+                # Transform that heading into Isaac world.
+                heading_world = torch.matmul(
+                    odom_to_world_rot,
+                    heading_odom.unsqueeze(-1),
+                ).squeeze(-1)
+
+                target_yaw_world = torch.atan2(
+                    heading_world[..., 1:2],
+                    heading_world[..., 0:1],
+                )
+
+            else:
+                target_yaw_world = target_yaw_odom
+
+            # VelController(yaw_control=True) expects:
+            #
+            #   [vx, vy, vz, target_yaw / pi]
+            #
+            # and internally multiplies the fourth component by pi.
+            target_yaw_normalized = target_yaw_world / torch.pi
+
+            action = torch.cat(
+                [action, target_yaw_normalized],
+                dim=-1,
+            )
 
             tensordict.set(
                 ("agents", "action"),
@@ -927,8 +971,13 @@ def main(cfg):
 
             self.t_odom_from_lidar = quat_to_transform(x_odom, y_odom, z_odom, qx, qy, qz, qw)
 
+            # Compatibility variable to env.py
+            self.drone_in_odom = np.array(
+                [x_odom, y_odom, z_odom],
+                dtype=np.float64,
+            )
+
             # Calculate the target in the odometry frame once
-            # Decoupling test - replaced if not self.target_initialized:
             if not self.world_to_odom_initialized:
                 # Assuming that the lidar is aligned with baselink
                 # .......... Change an use transforms when publishers are implemented ..........
@@ -957,23 +1006,6 @@ def main(cfg):
                 # 1.3 World to odom calculation
                 self.world_to_odom = np.matmul(self.t_odom_from_lidar, np.linalg.inv(t_world_from_lidar))
 
-                ''' Decoupling test - Remove
-                # ------------------------------------------------------------------
-                # Step 2: Calculate target in Odom frame
-
-                # Target in Isaac World frame
-                target_coords = self.target_pos[0, 0, :].detach().cpu().numpy()
-
-                target_in_world = np.array([target_coords[0], target_coords[1], target_coords[2], 1.0], dtype=np.float64)
-
-                # Target in Odom frame
-                self.target_in_odom = np.matmul(self.world_to_odom, target_in_world)
-
-                # Initial drone position for fixed target frame
-                self.initial_drone_pos = np.array([x_odom, y_odom, z_odom], dtype=np.float64)
-                self.target_dir = self.target_in_odom[:3] - self.initial_drone_pos
-                '''
-                # Decoupling test - Replace self.target_initialized
                 self.world_to_odom_initialized = True
 
             '''
@@ -1232,15 +1264,11 @@ def main(cfg):
     NavigationEnv.move_dynamic_obstacle = _patched_move_dynamic_obstacle
     NavigationEnv._post_sim_step = _patched_post_sim_step
 
-    # Decoupling test - -Removed _original_reset_target = NavigationEnv.reset_target
     _original_reset_idx = NavigationEnv._reset_idx
-
-    # Decoupling test -  Removed def _patched_reset_target(self, env_ids): ...
 
     def _patched_reset_idx(self, env_ids):
         print("[RESET] Resetting drone position.", flush=True)
         self.drone._reset_idx(env_ids, self.training)
-        # Decoupling test - Removed self.reset_target(env_ids)
 
         if hasattr(self, "_env_min"):
             xmin, ymin = self._env_min
@@ -1273,15 +1301,7 @@ def main(cfg):
         else:
             return _original_reset_idx(self, env_ids)
 
-        #self.target_dir[env_ids] = self.target_pos[env_ids] - pos
-
         rpy = torch.zeros(len(env_ids), 1, 3, device=self.device)
-
-        ''' Decoupling test - Removed
-        diff = self.target_pos[env_ids] - pos
-        facing_yaw = torch.atan2(diff[..., 1], diff[..., 0])
-        rpy[..., 2] = facing_yaw
-        '''
 
         from omni_drones.utils.torch import euler_to_quaternion
         rot = euler_to_quaternion(rpy)
@@ -1290,19 +1310,10 @@ def main(cfg):
         self.drone.set_velocities(self.init_vels[env_ids], env_ids)
         self.prev_drone_vel_w[env_ids] = 0.
 
-        ''' Decoupling test - Replaced
-        self.height_range[env_ids, 0, 0] = torch.min(
-            pos[:, 0, 2], self.target_pos[env_ids, 0, 2]
-        )
-        self.height_range[env_ids, 0, 1] = torch.max(
-            pos[:, 0, 2], self.target_pos[env_ids, 0, 2]
-        )
-        '''
         self.height_range[env_ids, 0, 0] = pos[:, 0, 2]
         self.height_range[env_ids, 0, 1] = pos[:, 0, 2]
 
         self.stats[env_ids] = 0.
-    #Decoupling test - Removed NavigationEnv.reset_target = _patched_reset_target
     NavigationEnv._reset_idx = _patched_reset_idx
 
 
@@ -1312,7 +1323,18 @@ def main(cfg):
     print("[EVAL] Creating environment...")
     env = NavigationEnv(cfg)
 
-    
+    # Legacy NavigationEnv compatibility only.
+    # These are NOT the deployed navigation goal.
+    env.target_in_odom = np.array(
+        [10.0, 0.0, 1.5, 1.0],
+        dtype=np.float64,
+    )
+
+    env.target_dir = np.array(
+        [1.0, 0.0, 0.0],
+        dtype=np.float64,
+    )
+
     # -------------------------------------------------------------------------
     # Camera test
     # RGB-D Camera ROS2 Publisher
@@ -1401,34 +1423,7 @@ def main(cfg):
     print("[CAMERA] RGB-D publishers configured")
     print("[CAMERA] RGB:   /camera/color/image_raw")
     print("[CAMERA] Depth: /camera/depth/image_raw")
-    
-    '''
-    # Visual-only target marker
-    try:
-        import omni.isaac.core.utils.prims as prim_utils
-        import omni.isaac.orbit.sim as sim_utils
 
-        target_marker_cfg = sim_utils.SphereCfg(
-            radius=0.25,
-            visual_material=sim_utils.PreviewSurfaceCfg(
-                diffuse_color=(1.0, 0.0, 0.0),
-                emissive_color=(1.0, 0.0, 0.0),
-            ),
-            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False),
-        )
-
-        target_marker_cfg.func(
-            "/World/DebugTargetMarker",
-            target_marker_cfg,
-            translation=(0.0, 0.0, 0.0),
-        )
-
-        env._target_marker_path = "/World/DebugTargetMarker"
-        print("[DEBUG-TARGET] visual marker created", flush=True)
-
-    except Exception as e:
-        print(f"[DEBUG-TARGET] failed to create marker: {repr(e)}", flush=True)
-    '''
     # Render RTX sensors every N env/sim steps.
     # With dt ~= 0.008 and sim rate ~=125 Hz:
     # N=12 gives about 10.4 Hz target render/LiDAR rate.
@@ -1652,10 +1647,27 @@ def main(cfg):
         device=cfg.device,
     )
 
+    # Yaw test add
+    env.latest_target_yaw = torch.zeros(
+        (1, 1, 1),
+        dtype=torch.float32,
+        device=cfg.device,
+    )
+
+    # Yaw test replace
+    '''
     def _cmd_vel_cb(msg):
         env.latest_cmd_vel[0, 0, 0] = msg.linear.x
         env.latest_cmd_vel[0, 0, 1] = msg.linear.y
         env.latest_cmd_vel[0, 0, 2] = msg.linear.z
+    '''
+
+    def _cmd_vel_cb(msg):
+        env.latest_cmd_vel[0, 0, 0] = msg.linear.x
+        env.latest_cmd_vel[0, 0, 1] = msg.linear.y
+        env.latest_cmd_vel[0, 0, 2] = msg.linear.z
+        # angular.z carries desired absolute yaw [rad].
+        env.latest_target_yaw[0, 0, 0] = msg.angular.z
 
     env.cmd_vel_sub = env.navrl_imu_ros_node.create_subscription(
         Twist,
@@ -1961,14 +1973,7 @@ def main(cfg):
 
         # Initializing placeholders for alignment
         env.world_to_odom = None
-        
-        ''' Decoupling Test - remove
-        env.drone_in_odom = None
-        env.target_in_odom = np.zeros(4, dtype=np.float64)
-        env.target_dir = np.array([1.0, 0.0, 0.0], dtype=np.float64)
-        env.initial_drone_pos = np.zeros(3, dtype=np.float64)
-        '''
-        # Decoupling test - Repalced env.target_initialized
+        env.drone_in_odom = None # env.py legacy compatibility
         env.world_to_odom_initialized = False
         env.t_odom_from_lidar = np.eye(4, dtype=np.float64)
 
@@ -2153,10 +2158,20 @@ def main(cfg):
     ctrl = LeePositionController(9.81, env.drone.params).to(cfg.device)
     transformed_env = TransformedEnv(
         env,
-        Compose(VelController(ctrl, yaw_control=False))
+        Compose(VelController(ctrl, yaw_control=True))
     ).train()
     transformed_env.set_seed(cfg.seed)
 
+    # Yaw test -add
+    ppo_action_spec = transformed_env.action_spec.clone()
+    ppo_action_spec["agents", "action"] = (
+        UnboundedContinuousTensorSpec(
+            (1, 3),
+            device=cfg.device,
+        )
+    )
+
+    ''' Yaw test -remove
     # Build PPO agent and load checkpoint
     policy = PPO(
         cfg.algo,
@@ -2164,17 +2179,19 @@ def main(cfg):
         transformed_env.action_spec,
         cfg.device
     )
+    '''
 
     print(f"[EVAL] Loading checkpoint: {ckpt_path}")
     state_dict = torch.load(ckpt_path, map_location=cfg.device)
-    policy.load_state_dict(state_dict)
+    # Yaw test - remove policy.load_state_dict(state_dict)
     print("[EVAL] Checkpoint loaded successfully")
-
+   
+    ''' Yaw test remove
     # Used when hovering is needed
     gated_policy = StartupGatedPolicy(
         base_policy=policy,
         env=env,
-    )
+    )'''
 
     # =========================================================================
     # SECTION 6: Run evaluation loop
@@ -2246,31 +2263,6 @@ def main(cfg):
             _eval_wall_t = time.perf_counter()
             _eval_loop_dt_ms = (_eval_wall_t - _last_eval_wall_t) * 1000.0
             _last_eval_wall_t = _eval_wall_t
-            '''
-            if i % 5 == 0:
-                print(f"[PROFILE-EVAL-LOOP] iter_dt={_eval_loop_dt_ms:.2f} ms", flush=True)
-            '''
-            #rclpy.spin_once(env.navrl_imu_ros_node, timeout_sec=0.0)
-
-            ''' Decoupling test - Remove
-            # Move visual-only target marker to current NavRL target
-            try:
-                from pxr import UsdGeom, Gf
-                stage = prim_utils.get_current_stage()
-                marker = stage.GetPrimAtPath(env._target_marker_path)
-
-                if marker.IsValid():
-                    x = float(env.target_pos[0, 0, 0].detach().cpu())
-                    y = float(env.target_pos[0, 0, 1].detach().cpu())
-                    z = float(env.target_pos[0, 0, 2].detach().cpu())
-
-                    xform = UsdGeom.Xformable(marker)
-                    xform.ClearXformOpOrder()
-                    xform.AddTranslateOp().Set(Gf.Vec3d(x, y, z))
-
-            except Exception:
-                pass
-            '''
 
             # Print stats if available
             if 'next' in data.keys() and 'stats' in data['next'].keys():

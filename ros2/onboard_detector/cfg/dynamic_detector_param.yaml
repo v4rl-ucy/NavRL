@@ -26,7 +26,9 @@ dynamic_detector_node:
                     0.0,  0.0,  0.0,  1.0]
 
     # detector genral
-    time_step: 0.033 # dt 
+    time_step: 0.033 # dt
+    time_source: "message" # Timer Test
+ 
     raycast_max_length: 5.0 # maximum depth
     filtering_BBox_IOU_threshold: 0.05 # min IOU to merge bbox
     

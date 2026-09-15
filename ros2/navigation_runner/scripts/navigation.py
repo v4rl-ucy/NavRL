@@ -7,6 +7,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import Bool
 from builtin_interfaces.msg import Duration
 from map_manager.srv import RayCast
+from ellipselio.srv import BatchCheckCollision
 from onboard_detector.srv import GetDynamicObstacles
 from navigation_runner.srv import GetSafeAction
 import torch
@@ -15,10 +16,10 @@ from torchrl.data import CompositeSpec, UnboundedContinuousTensorSpec
 from tensordict.tensordict import TensorDict
 from torchrl.envs.utils import ExplorationType, set_exploration_type
 from ppo import PPO
-from utils import vec_to_new_frame, vec_to_world
+from utils import vec_to_new_frame, vec_to_world, build_angular_mapping #TODO: move build_angular_mapping and other ellipsleio functions to an ellipse_lio_utils.py
 from pid_controller import AnglePIDController
 import os
-
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 class Navigation(Node):
     def __init__(self, cfg):
@@ -26,7 +27,20 @@ class Navigation(Node):
         self.cfg = cfg
         self.lidar_hbeams = int(360/self.cfg.sensor.lidar_hres)
         self.raypoints = []
+
+        # TODO: set up the dynamic obstacle pipeline
         self.dynamic_obstacles = []
+
+        '''
+        n_dyn = self.cfg.algo.feature_extractor.dyn_obs_num
+
+        self.dynamic_obstacles = (
+            torch.zeros((n_dyn, 3), device=self.cfg.device),
+            torch.zeros((n_dyn, 3), device=self.cfg.device),
+            torch.zeros((n_dyn, 3), device=self.cfg.device),
+        )
+        '''
+
         self.robot_size = 0.3 # radius
         self.raycast_vres = ((self.cfg.sensor.lidar_vfov[1] - self.cfg.sensor.lidar_vfov[0]))/(self.cfg.sensor.lidar_vbeams - 1) * np.pi/180.0
         self.raycast_hres = self.cfg.sensor.lidar_hres * np.pi/180.0
@@ -53,11 +67,27 @@ class Navigation(Node):
         self.vis_raycast = self.get_parameter('visualize_raycast').get_parameter_value().bool_value
         self.get_logger().info(f"[navRunner]: Visualize raycast is set to: {self.vis_raycast}.")
 
+        # Raycast Backend
+        # TODO: Have it actually control the loading of components
+        # like the physically motivated static obstacle observation space
+        # for EllipseLIO
+        self.declare_parameter('raycast_backend', 'ellipselio')
+        self.raycast_backend = (
+            self.get_parameter('raycast_backend')
+            .get_parameter_value()
+            .string_value
+        )
+
+        self.get_logger().info(
+            f"[navRunner]: Raycast backend: {self.raycast_backend}"
+        )
+
         # Subscriber
         self.declare_parameter('odom_topic', '/unitree_go2/odom')
         odom_topic = self.get_parameter('odom_topic').get_parameter_value().string_value
         self.get_logger().info(f"[navRunner]: Odom topic name: {odom_topic}.")
-        self.odom_sub = self.create_subscription(Odometry, odom_topic, self.odom_callback, 10) # odom
+        odom_qos = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=10, reliability=ReliabilityPolicy.BEST_EFFORT,)
+        self.odom_sub = self.create_subscription(Odometry, odom_topic, self.odom_callback, odom_qos)
         self.goal_sub = self.create_subscription(PoseStamped, '/goal_pose', self.goal_callback, 10) # goal
         self.emergency_stop_sub = self.create_subscription(Bool, '/navigation_emergency_stop', self.safety_check_callback, 10) # safety check
         
@@ -69,15 +99,61 @@ class Navigation(Node):
         self.goal_vis_pub = self.create_publisher(MarkerArray, 'navigation_runner/goal', 10)
 
         # Service client
+        # Raycast backend dependent client creation
         raycast_client_group = MutuallyExclusiveCallbackGroup()
-        self.raycast_client = self.create_client(RayCast, '/occupancy_map/raycast', callback_group=raycast_client_group)
+
+        if self.raycast_backend == 'ellipselio':
+
+            self.declare_parameter(
+                'collision_service',
+                '/ellipselio/batch_check_collision'
+            )
+
+            collision_service = (
+                self.get_parameter('collision_service')
+                .get_parameter_value()
+                .string_value
+            )
+
+            self.raycast_client = self.create_client(
+                BatchCheckCollision,
+                collision_service,
+                callback_group=raycast_client_group,
+            )
+
+            while not self.raycast_client.wait_for_service(
+                timeout_sec=1.0
+            ):
+                self.get_logger().info(
+                    f'[navRunner]: Service {collision_service} '
+                    'not available, waiting...'
+                )
+
+        elif self.raycast_backend == 'occupancy_map':
+
+            self.raycast_client = self.create_client(
+                RayCast,
+                '/occupancy_map/raycast',
+                callback_group=raycast_client_group,
+            )
+
+            while not self.raycast_client.wait_for_service(
+                timeout_sec=1.0
+            ):
+                self.get_logger().info(
+                    '[navRunner]: Service /occupancy_map/raycast '
+                    'not available, waiting...'
+                )
+
+        else:
+            raise ValueError(
+                f'Unknown raycast backend: {self.raycast_backend}'
+            )
+        
         dynamic_obstacle_client_group = MutuallyExclusiveCallbackGroup()
         self.get_dyn_obs_client = self.create_client(GetDynamicObstacles, '/onboard_detector/get_dynamic_obstacles', callback_group=dynamic_obstacle_client_group)
         safe_action_client_group = MutuallyExclusiveCallbackGroup()
         self.get_safe_action_client = self.create_client(GetSafeAction, '/safe_action/get_safe_action', callback_group=safe_action_client_group)
-        while not self.raycast_client.wait_for_service(timeout_sec=1.0):
-            self.get_logger().info('[navRunner]: Service /occupancy_map/raycast not available, waiting...')
-        
 
         # Controller
         self.angle_controller = AnglePIDController(kp=1.0, ki=0.0, kd=0.1, dt=0.05, max_angular_velocity=1.0)
@@ -89,6 +165,101 @@ class Navigation(Node):
         self.policy = self.init_model(ckpt_file)
         self.policy.eval()
 
+        # Physics Motivated Static Observation Space
+        # TODO: Have it derived from configuration rather than
+        #       hardcoded values (Use Hydra config?)
+        self.collision_detection_range = 4.0347
+
+        self.collision_rays_h = 37
+        self.collision_rays_v = 16
+
+        self.collision_fov_h = 2.0 * np.pi
+        self.collision_fov_v = np.deg2rad(104.0)
+
+        self.collision_separation_h = (
+            self.collision_fov_h / self.collision_rays_h
+        )
+
+        self.collision_separation_v = (
+            self.collision_fov_v / (self.collision_rays_v - 1)
+        )
+
+        self.collision_sample_distances = np.array([
+            4.0347, 3.7065, 3.4049, 3.1279, 2.8734, 2.6397,
+            2.4249, 2.2276, 2.0464, 1.8799, 1.7270, 1.5865,
+            1.4574, 1.3388, 1.2299, 1.1298, 1.0379, 0.9535,
+            0.8759, 0.8046, 0.7392, 0.6790, 0.6238, 0.5731,
+            0.5264, 0.4836, 0.4443, 0.4081, 0.3749, 0.3444,
+            0.3164, 0.2907
+        ], dtype=np.float64)
+
+        self.collision_radii = np.array([
+            0.3422, 0.3143, 0.2888, 0.2653, 0.2437, 0.2239,
+            0.2056, 0.1889, 0.1735, 0.1594, 0.1465, 0.1345,
+            0.1236, 0.1135, 0.1043, 0.0958, 0.0880, 0.0809,
+            0.0743, 0.0682, 0.0627, 0.0576, 0.0529, 0.0486,
+            0.0446, 0.0410, 0.0377, 0.0346, 0.0318, 0.0292,
+            0.0268, 0.0246
+        ], dtype=np.float64)
+
+        # Construct the collision Grid
+        # TODO: move into a function that takes the
+        # Physically motivated parameters and constructs the grid
+        self.collision_check_grid = np.empty(
+            (
+                self.collision_rays_h,
+                self.collision_rays_v,
+                len(self.collision_sample_distances),
+                3,
+            ),
+            dtype=np.float64,
+        )
+
+        for h in range(self.collision_rays_h):
+            for v in range(self.collision_rays_v):
+
+                angle_h = self.collision_separation_h * h
+                angle_v = (
+                    self.collision_separation_v * v
+                    - self.collision_fov_v / 2.0
+                )
+
+                direction = np.array([
+                    np.cos(angle_v) * np.cos(angle_h),
+                    np.cos(angle_v) * np.sin(angle_h),
+                    np.sin(angle_v),
+                ])
+
+                for k, distance in enumerate(
+                    self.collision_sample_distances
+                ):
+                    self.collision_check_grid[h, v, k] = (
+                        distance * direction
+                    )
+        self.collision_grid_id = 0
+
+        # Build Angular Mapping
+        # TODO: Probably also conditional to EllipseLIO
+        (
+            self.collision_h_mapping,
+            self.collision_v_mapping,
+        ) = build_angular_mapping(
+            source_h_count=self.collision_rays_h,
+            source_v_count=self.collision_rays_v,
+            source_h_fov=self.collision_fov_h,
+            source_v_min=-self.collision_fov_v / 2.0,
+            source_v_max=self.collision_fov_v / 2.0,
+
+            target_h_count=self.lidar_hbeams,
+            target_v_count=self.cfg.sensor.lidar_vbeams,
+            target_h_fov=2.0 * np.pi,
+            target_v_min=np.deg2rad(
+                self.cfg.sensor.lidar_vfov[0]
+            ),
+            target_v_max=np.deg2rad(
+                self.cfg.sensor.lidar_vfov[1]
+            ),
+        )
 
     def init_model(self, ckpt_file):
         observation_dim = 8
@@ -141,6 +312,7 @@ class Navigation(Node):
         self.target_dir = torch.tensor([dir_x, dir_y, dir_z], device=self.cfg.device) 
 
         self.goal_received = True
+        self.stable_times = 0
 
     def get_raycast(self, pos, start_angle):
         raypoints = []
@@ -162,6 +334,7 @@ class Navigation(Node):
 
         # Call the service asynchronously
         response = self.raycast_client.call(request)
+
         num_points = int(len(response.points) / 3)
         self.laser_points_msg = response.points
         for i in range(num_points):
@@ -171,6 +344,200 @@ class Navigation(Node):
                 response.points[3 * i + 2]
             ]
             raypoints.append(p)
+
+        return raypoints
+
+    def get_raycast_ellipselio(self, pos, start_angle):
+        # ---------------------------------------------------------
+        # 1. Rotate local collision grid into fixed goal frame.
+        # ---------------------------------------------------------
+
+        c = np.cos(start_angle)
+        s = np.sin(start_angle)
+
+        rot_goal = np.array([
+            [c, -s, 0.0],
+            [s,  c, 0.0],
+            [0.0, 0.0, 1.0],
+        ], dtype=np.float64)
+
+        aligned_grid = np.matmul(
+            self.collision_check_grid,
+            rot_goal.T,
+        )
+
+        aligned_grid += np.asarray(
+            pos,
+            dtype=np.float64,
+        )
+
+        # ---------------------------------------------------------
+        # 2. Call EllipseLIO.
+        # ---------------------------------------------------------
+
+        request = BatchCheckCollision.Request()
+
+        request.header = self.odom.header
+        request.rays_h = self.collision_rays_h
+        request.rays_v = self.collision_rays_v
+
+        request.points = (
+            aligned_grid
+            .reshape(-1)
+            .tolist()
+        )
+
+        request.radii = self.collision_radii.tolist()
+
+        self.collision_grid_id += 1
+        request.grid_id = self.collision_grid_id
+
+        response = self.raycast_client.call(request)
+
+        expected_size = (
+            self.collision_rays_h
+            * self.collision_rays_v
+            * len(self.collision_sample_distances)
+        )
+
+        if not response.success:
+            self.get_logger().warn(
+                f'[navRunner]: EllipseLIO collision query failed: '
+                f'{response.message}'
+            )
+            return []
+
+        if len(response.collision_grid) != expected_size:
+            self.get_logger().warn(
+                '[navRunner]: Unexpected collision grid size: '
+                f'{len(response.collision_grid)} != {expected_size}'
+            )
+            return []
+
+        # ---------------------------------------------------------
+        # 3. Reconstruct H x V x D collision tensor.
+        # ---------------------------------------------------------
+
+        collision_grid = np.asarray(
+            response.collision_grid,
+            dtype=np.bool_,
+        ).reshape(
+            self.collision_rays_h,
+            self.collision_rays_v,
+            len(self.collision_sample_distances),
+        )
+
+        # ---------------------------------------------------------
+        # 4. Collapse radial dimension:
+        #    nearest occupied collision sample.
+        # ---------------------------------------------------------
+
+        distance_scan = np.full(
+            (
+                self.collision_rays_h,
+                self.collision_rays_v,
+            ),
+            self.collision_detection_range,
+            dtype=np.float32,
+        )
+
+        for h in range(self.collision_rays_h):
+            for v in range(self.collision_rays_v):
+
+                # FAR -> NEAR storage, therefore reverse.
+                for k in range(
+                    len(self.collision_sample_distances) - 1,
+                    -1,
+                    -1,
+                ):
+                    if collision_grid[h, v, k]:
+                        distance_scan[h, v] = (
+                            self.collision_sample_distances[k]
+                        )
+                        break
+
+        # ---------------------------------------------------------
+        # 5. Collision angular grid -> trained NavRL angular grid.
+        # ---------------------------------------------------------
+
+        policy_distance_scan = np.full(
+            (
+                self.lidar_hbeams,
+                self.cfg.sensor.lidar_vbeams,
+            ),
+            self.cfg.sensor.lidar_range,
+            dtype=np.float32,
+        )
+
+        for h_policy, (h_left, h_right) in enumerate(
+            self.collision_h_mapping
+        ):
+            for v_policy, (v_lower, v_upper) in enumerate(
+                self.collision_v_mapping
+            ):
+
+                d0 = distance_scan[h_left,  v_lower]
+                d1 = distance_scan[h_left,  v_upper]
+                d2 = distance_scan[h_right, v_lower]
+                d3 = distance_scan[h_right, v_upper]
+
+                policy_distance_scan[h_policy, v_policy] = min(
+                    d0, d1, d2, d3
+                )
+
+        policy_distance_scan = np.clip(
+            policy_distance_scan,
+            0.0,
+            self.cfg.sensor.lidar_range,
+        )
+
+        # ---------------------------------------------------------
+        # 6. Reconstruct the XYZ ray endpoints expected by
+        #    existing navigation.py.
+        # ---------------------------------------------------------
+
+        raypoints = []
+
+        policy_h_angles = np.linspace(
+            0.0,
+            2.0 * np.pi,
+            self.lidar_hbeams,
+            endpoint=False,
+        )
+
+        policy_v_angles = np.linspace(
+            np.deg2rad(self.cfg.sensor.lidar_vfov[0]),
+            np.deg2rad(self.cfg.sensor.lidar_vfov[1]),
+            self.cfg.sensor.lidar_vbeams,
+        )
+
+        pos_np = np.asarray(pos, dtype=np.float64)
+
+        for h, h_local in enumerate(policy_h_angles):
+
+            h_world = start_angle + h_local
+
+            for v, v_angle in enumerate(policy_v_angles):
+
+                direction = np.array([
+                    np.cos(v_angle) * np.cos(h_world),
+                    np.cos(v_angle) * np.sin(h_world),
+                    np.sin(v_angle),
+                ])
+
+                endpoint = (
+                    pos_np
+                    + policy_distance_scan[h, v] * direction
+                )
+
+                raypoints.append(endpoint.tolist())
+
+        # Existing safe-action service wants flattened xyz values.
+        self.laser_points_msg = (
+            np.asarray(raypoints, dtype=np.float64)
+            .reshape(-1)
+            .tolist()
+        )
 
         return raypoints
 
@@ -192,6 +559,17 @@ class Navigation(Node):
 
         # Call the service asynchronously
         response = self.get_dyn_obs_client.call(request)
+
+        # DEBUG
+        print("\n========== DYNAMIC SERVICE DEBUG ==========")
+        print("response.position:", response.position)
+        print("response.velocity:", response.velocity)
+        print("response.size:", response.size)
+        print("len(position):", len(response.position))
+        print("len(velocity):", len(response.velocity))
+        print("len(size):", len(response.size))
+        print("===========================================\n")
+
         total_obs_num = len(response.position)
         max_obs_num = self.cfg.algo.feature_extractor.dyn_obs_num
 
@@ -272,9 +650,22 @@ class Navigation(Node):
             return
         pos = np.array([self.odom.pose.pose.position.x, self.odom.pose.pose.position.y, self.odom.pose.pose.position.z])
         start_angle = np.arctan2(self.target_dir[1].cpu().numpy(), self.target_dir[0].cpu().numpy())
-        self.raypoints = self.get_raycast(pos, start_angle)
-        # self.get_logger().info("[navRunner]: raycast callback end.")
+        
+        # Backend dependent call
+        if self.raycast_backend == 'ellipselio':
+            raypoints = self.get_raycast_ellipselio(
+                pos,
+                start_angle,
+            )
+        else:
+            raypoints = self.get_raycast(
+                pos,
+                start_angle,
+            )
 
+        if len(raypoints) != 0:
+            self.raypoints = raypoints
+        # self.get_logger().info("[navRunner]: raycast callback end.")
 
     def dynamic_obstacle_callback(self):
         # self.get_logger().info("[navRunner]: DO callback start.")
@@ -350,6 +741,8 @@ class Navigation(Node):
             })
         })
 
+
+        '''
         has_obstacle_in_range = self.check_obstacle(lidar_scan, dyn_obs_states)
         if (has_obstacle_in_range):
             with set_exploration_type(ExplorationType.MEAN):
@@ -361,33 +754,152 @@ class Navigation(Node):
         else:
             vel_world = (goal - pos)/torch.norm(goal - pos) * self.vel_limit
         return vel_world
+        '''
+        
+        has_obstacle_in_range = self.check_obstacle(lidar_scan, dyn_obs_states)
 
+        if has_obstacle_in_range:
+
+            # TEMP DEBUG: locate first NaN/Inf in dynamic-obstacle → PPO pipeline.
+            print("\n========== NAVRL DEBUG ==========")
+            print("dynamic_obstacle_pos:", dynamic_obstacle_pos)
+            print("dynamic_obstacle_vel:", dynamic_obstacle_vel)
+            print("dynamic_obstacle_size:", dynamic_obstacle_size)
+            print("dyn_obs_states:", dyn_obs_states)
+
+            print(
+                "finite dynamic_obstacle_pos:",
+                torch.isfinite(dynamic_obstacle_pos).all().item()
+            )
+            print(
+                "finite dynamic_obstacle_vel:",
+                torch.isfinite(dynamic_obstacle_vel).all().item()
+            )
+            print(
+                "finite dynamic_obstacle_size:",
+                torch.isfinite(dynamic_obstacle_size).all().item()
+            )
+            print(
+                "finite dyn_obs_states:",
+                torch.isfinite(dyn_obs_states).all().item()
+            )
+
+            with set_exploration_type(ExplorationType.MEAN):
+                output = self.policy(obs)
+
+            vel_local_normalized = output["agents", "action_normalized"]
+
+            print("vel_local_normalized:", vel_local_normalized)
+            print(
+                "finite vel_local_normalized:",
+                torch.isfinite(vel_local_normalized).all().item()
+            )
+
+            vel_local_world = (
+                2.0 * vel_local_normalized * self.vel_limit
+                - self.vel_limit
+            )
+
+            print("vel_local_world:", vel_local_world)
+            print(
+                "finite vel_local_world:",
+                torch.isfinite(vel_local_world).all().item()
+            )
+
+            vel_world = vec_to_world(
+                vel_local_world,
+                output["agents", "observation", "direction"]
+            )
+
+            print("vel_world:", vel_world)
+            print(
+                "finite vel_world:",
+                torch.isfinite(vel_world).all().item()
+            )
+            print("=================================\n")
+
+        else:
+            vel_world = (
+                (goal - pos)
+                / torch.norm(goal - pos)
+                * self.vel_limit
+            )
+
+        return vel_world
+    
     def control_callback(self):
         # self.get_logger().info("[navRunner]: Control callback start.")
 
         if (not self.odom_received):
             return
-
+        ''' Smoke test, REvert
         if (not self.goal_received or len(self.raypoints) == 0 or len(self.dynamic_obstacles) == 0):
             return
+        '''
+        if (not self.goal_received or len(self.raypoints) == 0):
+            return
 
-        if (self.safety_stop):
+        if self.safety_stop:
             final_cmd_vel = Twist()
-            final_cmd_vel.linear.x = 0.
-            final_cmd_vel.linear.y = 0.
-            final_cmd_vel.angular.x = 0.
+            final_cmd_vel.linear.x = 0.0
+            final_cmd_vel.linear.y = 0.0
+            final_cmd_vel.linear.z = 0.0
+            final_cmd_vel.angular.z = 0.0
+
             self.action_pub.publish(final_cmd_vel)
             self.get_logger().info("[navRunner]: Emergency stop triggers.")
             return
 
-        goal_angle = np.arctan2(self.target_dir[1].cpu().numpy(), self.target_dir[0].cpu().numpy())
-        _, _, curr_angle = self.quaternion_to_euler(self.odom.pose.pose.orientation.w, self.odom.pose.pose.orientation.x, self.odom.pose.pose.orientation.y, self.odom.pose.pose.orientation.z)
-        angle_diff = np.abs(goal_angle - curr_angle)
-        angular_velocity = self.angle_controller.compute_angular_velocity(goal_angle, curr_angle)
+        goal_angle = np.arctan2(
+            self.target_dir[1].cpu().numpy(),
+            self.target_dir[0].cpu().numpy()
+        )
 
-        if (angle_diff >= 0.3):
+        _, _, curr_angle = self.quaternion_to_euler(
+            self.odom.pose.pose.orientation.w,
+            self.odom.pose.pose.orientation.x,
+            self.odom.pose.pose.orientation.y,
+            self.odom.pose.pose.orientation.z,
+        )
+
+        # Shortest angular distance between current yaw and desired yaw.
+        angle_diff = np.abs(goal_angle - curr_angle)
+
+        if angle_diff > np.pi:
+            angle_diff = np.abs(angle_diff - 2.0 * np.pi)
+
+        # ---------------------------------------------------------
+        # UAV heading alignment
+        # ---------------------------------------------------------
+
+        # First rotate toward the goal while holding zero
+        # translational velocity.
+        if angle_diff >= 0.1:
+            self.stable_times = 0
+
             final_cmd_vel = Twist()
-            final_cmd_vel.angular.z = angular_velocity
+            final_cmd_vel.linear.x = 0.0
+            final_cmd_vel.linear.y = 0.0
+            final_cmd_vel.linear.z = 0.0
+
+            # Internal deployment convention:
+            # angular.z carries absolute desired yaw [rad].
+            final_cmd_vel.angular.z = float(goal_angle)
+
+            self.action_pub.publish(final_cmd_vel)
+            return
+
+        # Once inside the yaw tolerance, require 10 consecutive
+        # control cycles before allowing translational navigation.
+        self.stable_times += 1
+
+        if self.stable_times <= 10:
+            final_cmd_vel = Twist()
+            final_cmd_vel.linear.x = 0.0
+            final_cmd_vel.linear.y = 0.0
+            final_cmd_vel.linear.z = 0.0
+            final_cmd_vel.angular.z = float(goal_angle)
+
             self.action_pub.publish(final_cmd_vel)
             return
 
@@ -398,7 +910,9 @@ class Navigation(Node):
         vel_world = torch.tensor(rot @ vel_body, device=self.cfg.device, dtype=torch.float) # world vel
 
         # get RL action from model
-        cmd_vel_world = self.get_action(pos, vel_world, goal).squeeze(0).squeeze(0).detach().cpu().numpy()        
+        self.get_logger().info("Calling policy") # Smoke test remove
+        cmd_vel_world = self.get_action(pos, vel_world, goal).squeeze(0).squeeze(0).detach().cpu().numpy()
+        self.get_logger().info(f"Policy output: {cmd_vel_world}") # Smoke test remove
         self.cmd_vel_world = cmd_vel_world.copy()
 
         # get safe action
@@ -426,9 +940,19 @@ class Navigation(Node):
         
         # Send command
         final_cmd_vel = Twist()
+        ''' Body Frame
         final_cmd_vel.linear.x = safe_cmd_vel_local[0].item()
         final_cmd_vel.linear.y = safe_cmd_vel_local[1].item()
-        final_cmd_vel.angular.z = angular_velocity
+        '''
+
+        final_cmd_vel.linear.x = safe_cmd_vel_world[0].item()
+        final_cmd_vel.linear.y = safe_cmd_vel_world[1].item()
+
+        # Yaw test - Replace final_cmd_vel.angular.z = angular_velocity
+        # For the Isaac UAV deployment, angular.z carries the desired
+        # absolute yaw [rad], not a yaw-rate command.
+        final_cmd_vel.angular.z = float(goal_angle)
+
         if (self.height_control):
             final_cmd_vel.linear.z = safe_cmd_vel_world[2].item()
         else:
@@ -515,7 +1039,7 @@ class Navigation(Node):
             return
         msg = MarkerArray()
         goal_point = Marker()
-        goal_point.header.frame_id = "map"
+        goal_point.header.frame_id = "ellipselio/odom"
         goal_point.header.stamp = self.get_clock().now().to_msg()
         goal_point.ns = "goal_point"
         goal_point.id = 1

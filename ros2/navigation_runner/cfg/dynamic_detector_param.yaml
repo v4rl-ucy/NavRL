@@ -1,39 +1,65 @@
 dynamic_detector_node:
   ros__parameters:
-    localization_mode: 0 # 0: pose (default) 1: odom
-    depth_image_topic: /unitree_go2/front_cam/depth_image
-    color_image_topic: /unitree_go2/front_cam/color_image
-    pose_topic: /unitree_go2/pose
-    odom_topic: /unitree_go2/odom
+    localization_mode: 1 # 0: pose (default) 1: odom
+    depth_image_topic: /camera/depth/image_raw
+    color_image_topic: /camera/color/image_raw
+    #pose_topic: /unitree_go2/pose
+    odom_topic: /ellipselio/odom
 
     # camera parameters
-    depth_intrinsics: [458.1245542807029, 458.1245542807029, 320.0, 240.0] # fx,  fy, cx, cy
-    color_intrinsics: [458.1245542807029, 458.1245542807029, 320.0, 240.0] # fx,  fy, cx, cy
+    #depth_intrinsics: [458.1245542807029, 458.1245542807029, 320.0, 240.0] # fx,  fy, cx, cy
+    #color_intrinsics: [458.1245542807029, 458.1245542807029, 320.0, 240.0] # fx,  fy, cx, cy
+    # Isaac camera: 640x480, focal=18mm,
+    # horizontal aperture=36mm, vertical aperture=27mm
+    depth_intrinsics: [320.0, 320.0, 320.0, 240.0]
+    color_intrinsics: [320.0, 320.0, 320.0, 240.0]
+
     depth_scale_factor: 1000.0 # 1000 for Intel Realsense Camera
     depth_min_value: 0.5
     depth_max_value: 5.0
     depth_filter_margin: 10 # filter
     depth_skip_pixel: 2  # filter
+
     image_cols: 640
     image_rows: 480
-    body_to_camera_depth: [0.0,  0.0,  1.0,  0.09,
-                    -1.0,  0.0,  0.0,  0.0 ,   
-                    0.0, -1.0,  0.0,  0.095,
-                    0.0,  0.0,  0.0,  1.0]
-    body_to_camera_color: [0.0,  0.0,  1.0,  0.09,
-                    -1.0,  0.0,  0.0,  0.0 ,   
-                    0.0, -1.0,  0.0,  0.095,
-                    0.0,  0.0,  0.0,  1.0]
+    
+    #body_to_camera_depth: [0.0,  0.0,  1.0,  0.09,
+    #                -1.0,  0.0,  0.0,  0.0 ,   
+    #                0.0, -1.0,  0.0,  0.095,
+    #                0.0,  0.0,  0.0,  1.0]
+    #body_to_camera_color: [0.0,  0.0,  1.0,  0.09,
+    #                -1.0,  0.0,  0.0,  0.0 ,   
+    #                0.0, -1.0,  0.0,  0.095,
+    #                0.0,  0.0,  0.0,  1.0]
+    body_to_camera_depth: [
+       0.0,  0.0,  1.0,  0.18,
+      -1.0,  0.0,  0.0,  0.00,
+       0.0, -1.0,  0.0, -0.08,
+       0.0,  0.0,  0.0,  1.00
+    ]
+
+    body_to_camera_color: [
+       0.0,  0.0,  1.0,  0.18,
+      -1.0,  0.0,  0.0,  0.00,
+       0.0, -1.0,  0.0, -0.08,
+       0.0,  0.0,  0.0,  1.00
+    ]
 
     # detector genral
-    time_step: 0.033 # dt 
+    #time_step: 0.33 # dt
+    # Timer test
+    time_step: 0.28
+    processing_period: 0.28 
     raycast_max_length: 5.0 # maximum depth
-    filtering_BBox_IOU_threshold: 0.05 # min IOU to merge bbox
+    # default = 0.05. changed ot detect human
+    filtering_BBox_IOU_threshold: 0.01 # min IOU to merge bbox
     
     # DBSCAN
     ground_height: 0.1 # height of ground to remove ground points
-    dbscan_min_points_cluster: 20 # 20: 4.0m range; 30: 3.5m range 40: 3.0m range
-    dbscan_search_range_epsilon: 0.1 # searching range radius
+    # Default = 20 - changed it to try and identify human
+    dbscan_min_points_cluster: 5 # 20: 4.0m range; 30: 3.5m range 40: 3.0m range
+    # Default = 0.1 - changed it to try and identify human
+    dbscan_search_range_epsilon: 0.15 # searching range radius
     voxel_occupied_thresh: 5 # min num of points for a voxel to be occupied in voxel filter
 
     # tracking and data association
@@ -59,7 +85,8 @@ dynamic_detector_node:
     fix_size_dimension_threshold: 0.4 # dimension threshold (size of proportional) to fix box size
     frames_force_dynamic: 10 # Range of searching dynamic obstacles in box history
     frames_force_dynamic_check_range: 30 # threshold for forcing dynamic obstacles
-    dynamic_consistency_threshold: 5 # obstacles being voted as dynamic for continuous k frames are eligible to be classified as dynamic
+    # Default = 5 , test to detect human. Fix timing and camera flickering and revert
+    dynamic_consistency_threshold: 2 # obstacles being voted as dynamic for continuous k frames are eligible to be classified as dynamic
 
     # constrain size
     constrain_size: true

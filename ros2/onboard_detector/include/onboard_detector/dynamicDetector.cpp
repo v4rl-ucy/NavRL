@@ -10,8 +10,14 @@ namespace onboardDetector{
         this->ns_ = "onboard_detector";
         this->hint_ = "[onboardDetector]";
         this->initParam();
+           
+         std::cout << "BEFORE registerPub" << std::endl;
         this->registerPub();
+        std::cout << "AFTER registerPub" << std::endl;
+
+        std::cout << "BEFORE registerCallback" << std::endl;
         this->registerCallback();
+        std::cout << "AFTER registerCallback" << std::endl;
     }
 
     void dynamicDetector::initParam(){
@@ -124,6 +130,31 @@ namespace onboardDetector{
         this->declare_parameter<double>("time_step", 0.033);
         this->get_parameter("time_step", this->dt_);
         std::cout << this->hint_ << ": The time step for the system is set to: " << this->dt_ << std::endl;
+
+        // Timer test - block
+        // ==============================================
+        // timing source
+        this->declare_parameter<std::string>(
+            "time_source",
+            "message");
+
+        this->get_parameter(
+            "time_source",
+            this->timeSource_);
+
+        if (this->timeSource_ != "message" &&
+            this->timeSource_ != "steady")
+        {
+            throw std::runtime_error(
+                "time_source must be 'message' or 'steady'");
+        }
+
+        std::cout
+            << this->hint_
+            << ": Time source: "
+            << this->timeSource_
+            << std::endl;
+        // ==============================================
 
         // raycast max length
         this->declare_parameter<double>("raycast_max_length", 5.0);
@@ -330,7 +361,7 @@ namespace onboardDetector{
 			this->depthPoseSync_->registerCallback(std::bind(&dynamicDetector::depthPoseCB, this, std::placeholders::_1, std::placeholders::_2));
         }
         else{
-			this->odomSub_ = std::make_shared<message_filters::Subscriber<nav_msgs::msg::Odometry>>(this, this->odomTopicName_);
+			this->odomSub_ = std::make_shared<message_filters::Subscriber<nav_msgs::msg::Odometry>>(this,this->odomTopicName_,rclcpp::SensorDataQoS().get_rmw_qos_profile());
 			this->depthOdomSync_ = std::make_shared<message_filters::Synchronizer<depthOdomSync>>(depthOdomSync(100), *this->depthSub_, *this->odomSub_);
 			this->depthOdomSync_->registerCallback(std::bind(&dynamicDetector::depthOdomCB, this, std::placeholders::_1, std::placeholders::_2));
         }
@@ -340,16 +371,21 @@ namespace onboardDetector{
 
         // yolo detection results subscriber
         this->yoloDetectionSub_ = this->create_subscription<vision_msgs::msg::Detection2DArray>("yolo_detector/detected_bounding_boxes", 10, std::bind(&dynamicDetector::yoloDetectionCB, this, std::placeholders::_1));
-    
-        int timeStep = this->dt_ * 1000.0;
+        
+        // Timer test - commented out bolck
+        // ===================================
+        //int timeStep = this->dt_ * 1000.0;
+
         // detection timer
-        this->detectionTimer_ = this->create_wall_timer(std::chrono::milliseconds(timeStep), std::bind(&dynamicDetector::detectionCB, this));
+        //this->detectionTimer_ = this->create_wall_timer(std::chrono::milliseconds(timeStep), std::bind(&dynamicDetector::detectionCB, this));
 
         // tracking timer
-        this->trackingTimer_ = this->create_wall_timer(std::chrono::milliseconds(timeStep), std::bind(&dynamicDetector::trackingCB, this));
+        //this->trackingTimer_ = this->create_wall_timer(std::chrono::milliseconds(timeStep), std::bind(&dynamicDetector::trackingCB, this));
 
         // classification timer
-        this->classificationTimer_ = this->create_wall_timer(std::chrono::milliseconds(timeStep), std::bind(&dynamicDetector::classificationCB, this));
+        //this->classificationTimer_ = this->create_wall_timer(std::chrono::milliseconds(timeStep), std::bind(&dynamicDetector::classificationCB, this));
+        // ===================================
+
 
         // visualization timer
         this->visTimer_ = this->create_wall_timer(33ms, std::bind(&dynamicDetector::visCB, this));
@@ -439,6 +475,10 @@ namespace onboardDetector{
         this->positionColor_(1) = camPoseColorMatrix(1, 3);
         this->positionColor_(2) = camPoseColorMatrix(2, 3);
         this->orientationColor_ = camPoseColorMatrix.block<3, 3>(0, 0);
+
+        // Timer test
+        this->processNewObservation(
+            img->header.stamp);
     }
 
     void dynamicDetector::depthOdomCB(const sensor_msgs::msg::Image::ConstSharedPtr& img, const nav_msgs::msg::Odometry::ConstSharedPtr& odom){
@@ -470,6 +510,12 @@ namespace onboardDetector{
         this->positionColor_(1) = camPoseColorMatrix(1, 3);
         this->positionColor_(2) = camPoseColorMatrix(2, 3);
         this->orientationColor_ = camPoseColorMatrix.block<3, 3>(0, 0);
+
+        // Timer test
+        // Everything belonging to this synchronized
+        // depth + odometry observation is now stored.
+        this->processNewObservation(
+            img->header.stamp);
     }
 
     void dynamicDetector::colorImgCB(const sensor_msgs::msg::Image::ConstSharedPtr& img){
@@ -481,13 +527,80 @@ namespace onboardDetector{
         this->yoloDetectionResults_ = *detections;
     }
 
+    // Timer test - Added function
+    void dynamicDetector::processNewObservation(
+        const builtin_interfaces::msg::Time& messageStamp)
+    {
+        double measuredDt = this->dt_;
+
+        if (this->timeSource_ == "message")
+        {
+            rclcpp::Time currentStamp(
+                messageStamp,
+                RCL_ROS_TIME);
+
+            if (this->hasLastMessageStamp_)
+            {
+                measuredDt =
+                    (currentStamp -
+                     this->lastMessageStamp_).seconds();
+            }
+
+            this->lastMessageStamp_ = currentStamp;
+            this->hasLastMessageStamp_ = true;
+        }
+        else
+        {
+            auto currentStamp =
+                std::chrono::steady_clock::now();
+
+            if (this->hasLastSteadyStamp_)
+            {
+                measuredDt =
+                    std::chrono::duration<double>(
+                        currentStamp -
+                        this->lastSteadyStamp_
+                    ).count();
+            }
+
+            this->lastSteadyStamp_ = currentStamp;
+            this->hasLastSteadyStamp_ = true;
+        }
+
+        if (measuredDt > 0.0)
+        {
+            this->dt_ = measuredDt;
+        }
+
+        std::cout
+            << "[dynamicDetector] dt = "
+            << this->dt_
+            << " s, rate = "
+            << (1.0 / this->dt_)
+            << " Hz, source = "
+            << this->timeSource_
+            << std::endl;
+
+        // One synchronized sensor observation
+        // corresponds to exactly one detector update.
+        this->detectionCB();
+        this->trackingCB();
+        this->classificationCB();
+    }
+
     void dynamicDetector::detectionCB(){
+        //Camera test
+        if (this->depthImage_.empty()){
+            return;
+        }
         // update pose history
         this->updatePoseHist();
         this->dbscanDetect();
         this->uvDetect();
         this->filterBBoxes();
+
         this->newDetectFlag_ = true; // get a new detection
+
     }
 
     void dynamicDetector::trackingCB(){
@@ -507,6 +620,7 @@ namespace onboardDetector{
     }
 
     void dynamicDetector::classificationCB(){
+
         std::vector<onboardDetector::box3D> dynamicBBoxesTemp;
 
         // Iterate through all pointcloud/bounding boxes history (note that yolo's pointclouds are dummy pointcloud (empty))
@@ -588,6 +702,10 @@ namespace onboardDetector{
             int numPoints = currPc.size(); // it changes within loop
             int votes = 0;
 
+            // DEBUG delete
+           int numSkipFov = 0;
+           int numSkipVel = 0;
+
             Vbox(0) = (this->boxHist_[i][0].x - this->boxHist_[i][curFrameGap].x)/(this->dt_*curFrameGap);
             Vbox(1) = (this->boxHist_[i][0].y - this->boxHist_[i][curFrameGap].y)/(this->dt_*curFrameGap);
             Vbox(2) = (this->boxHist_[i][0].z - this->boxHist_[i][curFrameGap].z)/(this->dt_*curFrameGap);
@@ -600,6 +718,7 @@ namespace onboardDetector{
                 // don't perform classification for points unseen in previous frame
                 if (!this->isInFov(this->positionHist_[curFrameGap], this->orientationHist_[curFrameGap], currPc[j])){
                     ++numSkip;
+                    ++numSkipFov; // DEBUG delete
                     --numPoints;
                     continue;
                 }
@@ -618,6 +737,7 @@ namespace onboardDetector{
 
                 if (velSim < 0){
                     ++numSkip;
+                    ++numSkipVel; // DEBUG delete
                     --numPoints;
                 }
                 else{
@@ -631,6 +751,15 @@ namespace onboardDetector{
             // update dynamic boxes
             double voteRatio = (numPoints>0)?double(votes)/double(numPoints):0;
             double velNorm = Vkf.norm();
+
+            // DEBUG delete
+            std::cout
+                << "voteRatio=" << voteRatio
+                << " velNorm=" << velNorm
+                << " numPoints=" << numPoints
+                << " skipFov=" << numSkipFov
+                << " skipVel=" << numSkipVel
+                << std::endl;
 
             // voting and velocity threshold
             // 1. point cloud voting ratio.
@@ -686,6 +815,11 @@ namespace onboardDetector{
     }
 
     void dynamicDetector::visCB(){
+        // Camera Test
+        if (this->uvDetector_ == nullptr){
+            return;
+        }
+
         this->publishUVImages();
         this->publish3dBox(this->uvBBoxes_, this->uvBBoxesPub_, 0, 1, 0);
         std::vector<Eigen::Vector3d> dynamicPoints;
@@ -909,6 +1043,7 @@ namespace onboardDetector{
         for (int v=this->depthFilterMargin_; v<rows-this->depthFilterMargin_; v=v+this->skipPixel_){ // row
             rowPtr = this->depthImage_.ptr<uint16_t>(v) + this->depthFilterMargin_;
             for (int u=this->depthFilterMargin_; u<cols-this->depthFilterMargin_; u=u+this->skipPixel_){ // column
+                /* test
                 depth = (*rowPtr) * inv_factor;
                 
                 if (*rowPtr == 0) {
@@ -919,6 +1054,21 @@ namespace onboardDetector{
                     depth = this->raycastMaxLength_ + 0.1;
                 }
                 rowPtr =  rowPtr + this->skipPixel_;
+                */
+
+                uint16_t rawDepth = *rowPtr;
+                depth = rawDepth * inv_factor;
+
+                // advance immediately, before any possible continue
+                rowPtr = rowPtr + this->skipPixel_;
+
+                if (rawDepth == 0) {
+                    depth = this->raycastMaxLength_ + 0.1;
+                } else if (depth < this->depthMinValue_) {
+                    continue;
+                } else if (depth > this->depthMaxValue_) {
+                    depth = this->raycastMaxLength_ + 0.1;
+                }
 
                 // get 3D point in camera frame
                 currPointCam(0) = (u - this->cx_) * depth * inv_fx;
@@ -969,10 +1119,29 @@ namespace onboardDetector{
             }            
         }
 
+        // TEST REPLACE
+        /*
         for (size_t i=0 ; i<pcClusters.size() ; ++i){
             Eigen::Vector3d pcClusterCenter(0.,0.,0.);
             Eigen::Vector3d pcClusterStd(0.,0.,0.);
             this->calcPcFeat(pcClusters[i], pcClusterCenter, pcClusterStd);
+            pcClusterCenters.push_back(pcClusterCenter);
+            pcClusterStds.push_back(pcClusterStd);
+        }
+        */
+
+        pcClusterCenters.clear();
+        pcClusterStds.clear();
+
+        for (size_t i=0 ; i<pcClusters.size() ; ++i){
+            Eigen::Vector3d pcClusterCenter(0.,0.,0.);
+            Eigen::Vector3d pcClusterStd(0.,0.,0.);
+
+            this->calcPcFeat(
+                pcClusters[i],
+                pcClusterCenter,
+                pcClusterStd);
+
             pcClusterCenters.push_back(pcClusterCenter);
             pcClusterStds.push_back(pcClusterStd);
         }
@@ -1005,7 +1174,19 @@ namespace onboardDetector{
             box.x_width = (xmax - xmin)>0.1?(xmax-xmin):0.1;
             box.y_width = (ymax - ymin)>0.1?(ymax-ymin):0.1;
             box.z_width = (zmax - zmin);
+
+            std::cout
+                << "DBBOX[" << i << "] center=("
+                << box.x << " " << box.y << " " << box.z
+                << ") size=("
+                << box.x_width << " "
+                << box.y_width << " "
+                << box.z_width << ")"
+                << std::endl;
+
             bboxes.push_back(box);
+
+            
         }
     }
 
@@ -1077,6 +1258,17 @@ namespace onboardDetector{
 
             this->transformBBox(center, size, this->positionDepth_, this->orientationDepth_, newCenter, newSize);
 
+            // DEBUG print
+            std::cout
+                << "UV-MAP[" << i << "] center=("
+                << newCenter(0) << " "
+                << newCenter(1) << " "
+                << newCenter(2) << ") size=("
+                << newSize(0) << " "
+                << newSize(1) << " "
+                << newSize(2) << ")"
+                << std::endl;
+
             // assign values to bounding boxes in the map frame
             bbox.x = newCenter(0);
             bbox.y = newCenter(1);
@@ -1106,6 +1298,7 @@ namespace onboardDetector{
                 this->filters_.push_back(newFilter);
             }
         }
+
         else{
             // start association only if a new detection is available
             if (this->newDetectFlag_){
@@ -1491,6 +1684,12 @@ namespace onboardDetector{
         estimatedBBox.x_width = std::min(std::abs(boxHist[0].x-lastDetect.x) + boxHist[0].x_width, 1.5 * boxHist[0].x_width);
         estimatedBBox.y_width = std::min(std::abs(boxHist[0].y-lastDetect.y) + boxHist[0].y_width, 1.5 * boxHist[0].y_width);
         estimatedBBox.z_width = boxHist[0].z_width;
+
+        // Shoot up test -Added
+        estimatedBBox.Vx = boxHist[0].Vx;
+        estimatedBBox.Vy = boxHist[0].Vy;
+        estimatedBBox.Vz = boxHist[0].Vz;
+
         estimatedBBox.is_estimated = true;
     }
 
@@ -1589,7 +1788,8 @@ namespace onboardDetector{
         cloud.width = cloud.points.size();
         cloud.height = 1;
         cloud.is_dense = true;
-        cloud.header.frame_id = "map";
+        // Make configurable
+        cloud.header.frame_id = "ellipselio/odom";
 
         sensor_msgs::msg::PointCloud2 cloudMsg;
         pcl::toROSMsg(cloud, cloudMsg);
@@ -1601,7 +1801,8 @@ namespace onboardDetector{
         // visualization using bounding boxes 
         visualization_msgs::msg::Marker line;
         visualization_msgs::msg::MarkerArray lines;
-        line.header.frame_id = "map";
+        // Make confisurable 
+        line.header.frame_id = "ellipselio/odom";
         line.type = visualization_msgs::msg::Marker::LINE_LIST;
         line.action = visualization_msgs::msg::Marker::ADD;
         line.ns = "box3D";  
@@ -1613,6 +1814,13 @@ namespace onboardDetector{
         line.lifetime = rclcpp::Duration::from_seconds(0.1);
         
         for(size_t i = 0; i < boxes.size(); i++){
+            // test
+            line.points.clear();
+            line.color.r = r;
+            line.color.g = g;
+            line.color.b = b;
+            line.color.a = 1.0;
+
             // for estimated bbox, using a different color
             if (boxes[i].is_estimated){
                  line.color.r = 0.8;
@@ -1625,13 +1833,15 @@ namespace onboardDetector{
             line.text = " Vx " + std::to_string(boxes[i].Vx) + " Vy " + std::to_string(boxes[i].Vy);
             double x = boxes[i].x; 
             double y = boxes[i].y; 
-            double z = (boxes[i].z+boxes[i].z_width/2)/2; 
+            double z = boxes[i].z;
+
+            // test double z = (boxes[i].z+boxes[i].z_width/2)/2; 
 
             // double x_width = std::max(boxes[i].x_width,boxes[i].y_width);
             // double y_width = std::max(boxes[i].x_width,boxes[i].y_width);
             double x_width = boxes[i].x_width;
             double y_width = boxes[i].y_width;
-            double z_width = 2*z;
+            double z_width = boxes[i].z_width;
 
             // double z = 
             
@@ -1702,7 +1912,8 @@ namespace onboardDetector{
         int countMarker = 0;
         for (size_t i=0; i<this->boxHist_.size(); ++i){
             visualization_msgs::msg::Marker traj;
-            traj.header.frame_id = "map";
+            // Make Configurable
+            traj.header.frame_id = "ellipselio/odom";
             traj.header.stamp = this->get_clock()->now();
             traj.ns = "dynamic_detector";
             traj.id = countMarker;
@@ -1731,12 +1942,14 @@ namespace onboardDetector{
         this->historyTrajPub_->publish(trajMsg);
     }
 
+    /*
     void dynamicDetector::publishVelVis(){ // publish velocities for all tracked objects
         visualization_msgs::msg::MarkerArray velVisMsg;
         int countMarker = 0;
         for (size_t i=0; i<this->trackedBBoxes_.size(); ++i){
             visualization_msgs::msg::Marker velMarker;
-            velMarker.header.frame_id = "map";
+            // Make Configurable
+            velMarker.header.frame_id = "ellipselio/odom";
             velMarker.header.stamp = this->get_clock()->now();
             velMarker.ns = "dynamic_detector";
             velMarker.id =  countMarker;
@@ -1766,19 +1979,136 @@ namespace onboardDetector{
         }
         this->velVisPub_->publish(velVisMsg);
     }
+    */
 
+    void dynamicDetector::publishVelVis(){ // publish velocities for all tracked objects
+        visualization_msgs::msg::MarkerArray velVisMsg;
+        int countMarker = 0;
+
+        for (size_t i=0; i<this->trackedBBoxes_.size(); ++i){
+            double vx = this->trackedBBoxes_[i].Vx;
+            double vy = this->trackedBBoxes_[i].Vy;
+            double vNorm = sqrt(vx*vx + vy*vy);
+
+            // ============================================================
+            // Text marker
+            // ============================================================
+            visualization_msgs::msg::Marker velMarker;
+
+            velMarker.header.frame_id = "ellipselio/odom";
+            velMarker.header.stamp = this->get_clock()->now();
+            velMarker.ns = "dynamic_detector_velocity_text";
+            velMarker.id = countMarker++;
+            velMarker.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
+
+            velMarker.pose.position.x = this->trackedBBoxes_[i].x;
+            velMarker.pose.position.y = this->trackedBBoxes_[i].y;
+            velMarker.pose.position.z =
+                this->trackedBBoxes_[i].z +
+                this->trackedBBoxes_[i].z_width / 2.0 + 0.3;
+
+            velMarker.scale.x = 0.15;
+            velMarker.scale.y = 0.15;
+            velMarker.scale.z = 0.15;
+
+            velMarker.color.a = 1.0;
+            velMarker.color.r = 1.0;
+            velMarker.color.g = 0.0;
+            velMarker.color.b = 0.0;
+
+            velMarker.lifetime = rclcpp::Duration::from_seconds(0.1);
+
+            std::ostringstream velStream;
+            velStream << std::fixed << std::setprecision(2);
+            velStream << "Vx=" << vx
+                      << ", Vy=" << vy
+                      << ", |V|=" << vNorm;
+
+            velMarker.text = velStream.str();
+
+            velVisMsg.markers.push_back(velMarker);
+
+
+            // ============================================================
+            // Velocity arrow
+            // ============================================================
+            visualization_msgs::msg::Marker arrowMarker;
+
+            arrowMarker.header.frame_id = "ellipselio/odom";
+            arrowMarker.header.stamp = this->get_clock()->now();
+            arrowMarker.ns = "dynamic_detector_velocity_arrow";
+            arrowMarker.id = countMarker++;
+            arrowMarker.type = visualization_msgs::msg::Marker::ARROW;
+
+            geometry_msgs::msg::Point start;
+            geometry_msgs::msg::Point end;
+
+            start.x = this->trackedBBoxes_[i].x;
+            start.y = this->trackedBBoxes_[i].y;
+            start.z = this->trackedBBoxes_[i].z;
+
+            // Arrow represents one second of motion.
+            double velocityScale = 1.0;
+
+            end.x = start.x + velocityScale * vx;
+            end.y = start.y + velocityScale * vy;
+            end.z = start.z;
+
+            arrowMarker.points.push_back(start);
+            arrowMarker.points.push_back(end);
+
+            // For ARROW markers defined using points:
+            // scale.x = shaft diameter
+            // scale.y = arrow-head diameter
+            // scale.z = arrow-head length
+            arrowMarker.scale.x = 0.05;
+            arrowMarker.scale.y = 0.10;
+            arrowMarker.scale.z = 0.10;
+
+            arrowMarker.color.a = 1.0;
+            arrowMarker.color.r = 0.0;
+            arrowMarker.color.g = 1.0;
+            arrowMarker.color.b = 0.0;
+
+            arrowMarker.lifetime = rclcpp::Duration::from_seconds(0.1);
+
+            velVisMsg.markers.push_back(arrowMarker);
+        }
+
+        this->velVisPub_->publish(velVisMsg);
+    }
+
+    /*
     void dynamicDetector::updatePoseHist(){ 
         if (int(this->positionHist_.size()) == this->skipFrame_){
             this->positionHist_.pop_back();
         }
         else{
-            this->positionHist_.push_front(this->position_);
+            //this->positionHist_.push_front(this->position_);
+            // Test - frame mismatch
+            this->positionHist_.push_front(this->positionDepth_);
         }
         if (int(this->orientationHist_.size()) == this->skipFrame_){
             this->orientationHist_.pop_back();
         }
         else{
-            this->orientationHist_.push_front(this->orientation_);
+            //this->orientationHist_.push_front(this->orientation_);
+            // Test - frame mismatch
+            this->orientationHist_.push_front(this->orientationDepth_);
+        }
+    }
+    */ //Test my be alright to reploace
+
+    void dynamicDetector::updatePoseHist(){
+
+        this->positionHist_.push_front(this->positionDepth_);
+        if (int(this->positionHist_.size()) > this->skipFrame_ + 1){
+            this->positionHist_.pop_back();
+        }
+
+        this->orientationHist_.push_front(this->orientationDepth_);
+        if (int(this->orientationHist_.size()) > this->skipFrame_ + 1){
+            this->orientationHist_.pop_back();
         }
     }
 
@@ -1844,7 +2174,12 @@ namespace onboardDetector{
         camRay = orientation.inverse()*worldRay;
         double camRayX = abs(camRay.dot(camUnitX));
         double camRayY = abs(camRay.dot(camUnitY));
-        double camRayZ = abs(camRay.dot(camUnitZ));
+        //test
+        //double camRayZ = abs(camRay.dot(camUnitZ));
+        double camRayZ = camRay.dot(camUnitZ);
+        if (camRayZ <= 0.0) {
+            return false;
+        }
 
         double htan = camRayX/camRayZ;
         double vtan = camRayY/camRayZ;

@@ -440,7 +440,7 @@ namespace onboardDetector{
             float bb_x = x / this->col_scale;
             float bb_width = width / this->col_scale;
             float bb_y = y_up;
-            // std::cout<<" y_up  "<<y_up<<" y_down "<<y_down<<std::endl;
+            std::cout<<" y_up  "<<y_up<<" y_down "<<y_down<<std::endl;
             float bb_height = y_down-y_up;
             this->bounding_box_D.push_back(cv::Rect(bb_x, bb_y, bb_width, bb_height));
         
@@ -477,7 +477,7 @@ namespace onboardDetector{
             curr_box.z_width /=1000.0;
             // std::cout<<"uv box on came raw z_width "<<curr_box.z_width<<std::endl;
             box3Ds.push_back(curr_box);
-            // printf("3d box %d on cam: %f, %f, %f,%f ,%f, %f\n",curr_box.x,curr_box.y,curr_box.z,curr_box.x_width,curr_box.y_width,curr_box.z_width);
+            //printf("3d box %d on cam: %f, %f, %f,%f ,%f, %f\n",curr_box.x,curr_box.y,curr_box.z,curr_box.x_width,curr_box.y_width,curr_box.z_width);
             // printf("depth in near: %f \n",depth_in_near);
         }
     }
