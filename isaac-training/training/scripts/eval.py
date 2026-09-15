@@ -74,7 +74,7 @@ def main(cfg):
         "enable_motion_bvh": True,
     })
 
-    
+    '''
     import carb
 
     carb.settings.get_settings().set_int("/rtx/debugMaterialType", 0)
@@ -84,7 +84,8 @@ def main(cfg):
     settings.set("/rtx/rendermode", "MinimalRendering")
     settings.set_int("/rtx/minimal/mode", 1)
     settings.set_float("/rtx/sceneDb/ambientLightIntensity", 0.5)
-    
+    '''
+
     # =========================================================================
     # Enable required extensions
     # These were disabled by default in Isaac Sim 5.1 but are needed by
@@ -260,6 +261,23 @@ def main(cfg):
             translation=(0.0, 0.0, 0.0),
         )
         print("[EVAL] Warehouse loaded")
+
+        # Test Cube
+        # Test prop for LiDAR geometry
+        test_cube_cfg = sim_utils.CuboidCfg(
+            size=(1.0, 1.0, 1.0),
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                collision_enabled=True
+            ),
+        )
+
+        test_cube_cfg.func(
+            "/World/TestCube",
+            test_cube_cfg,
+            translation=(2.0, 1.0, 1.5),
+        )
+
+        print("[EVAL] Test cube spawned", flush=True)
 
         from pxr import UsdGeom
         stage = prim_utils.get_current_stage()
@@ -456,11 +474,25 @@ def main(cfg):
             y = radius * math.sin(angle)
             spawn_positions.append((x, y, 0.0))
         '''
+
+        ''' Restore this
         spawn_positions = []
         for i in range(n_people):
             x = self._env_min[0] + (self._env_max[0] - self._env_min[0]) * np.random.random()
             y = self._env_min[1] + (self._env_max[1] - self._env_min[1]) * np.random.random()
             spawn_positions.append((x, y, 0.0))
+        '''
+        # Test simple Room
+        spawn_positions = []
+        x = -1.0
+        y = 0.0
+        spawn_positions.append((x, y, 0.0))
+        # Extras
+        spawn_positions.append((20.0, 20.0, 0))
+        spawn_positions.append((20.0, 20.0, 0))
+        spawn_positions.append((20.0, 20.0, 0))
+        spawn_positions.append((20.0, 20.0, 0))
+
         _eval_config['people_prims'] = []
 
         for i in range(n_people):
@@ -595,6 +627,35 @@ def main(cfg):
                     )
 
                 self._holding_last_state = navigation_ready
+
+            return tensordict
+
+    # Deployment Test
+    class ROSCmdVelPolicy:
+        def __init__(self, env):
+            self.env = env
+
+        def __call__(self, tensordict):
+            action = self.env.latest_cmd_vel.clone()
+
+            if getattr(self.env, "world_to_odom", None) is not None:
+                odom_to_world_rot = self.env.world_to_odom[0:3, 0:3].T
+
+                odom_to_world_rot = torch.as_tensor(
+                    odom_to_world_rot,
+                    dtype=action.dtype,
+                    device=action.device,
+                )
+
+                action = torch.matmul(
+                    odom_to_world_rot,
+                    action.unsqueeze(-1),
+                ).squeeze(-1)
+
+            tensordict.set(
+                ("agents", "action"),
+                action,
+            )
 
             return tensordict
 
@@ -867,7 +928,8 @@ def main(cfg):
             self.t_odom_from_lidar = quat_to_transform(x_odom, y_odom, z_odom, qx, qy, qz, qw)
 
             # Calculate the target in the odometry frame once
-            if not self.target_initialized:
+            # Decoupling test - replaced if not self.target_initialized:
+            if not self.world_to_odom_initialized:
                 # Assuming that the lidar is aligned with baselink
                 # .......... Change an use transforms when publishers are implemented ..........
 
@@ -895,6 +957,7 @@ def main(cfg):
                 # 1.3 World to odom calculation
                 self.world_to_odom = np.matmul(self.t_odom_from_lidar, np.linalg.inv(t_world_from_lidar))
 
+                ''' Decoupling test - Remove
                 # ------------------------------------------------------------------
                 # Step 2: Calculate target in Odom frame
 
@@ -909,8 +972,11 @@ def main(cfg):
                 # Initial drone position for fixed target frame
                 self.initial_drone_pos = np.array([x_odom, y_odom, z_odom], dtype=np.float64)
                 self.target_dir = self.target_in_odom[:3] - self.initial_drone_pos
+                '''
+                # Decoupling test - Replace self.target_initialized
+                self.world_to_odom_initialized = True
 
-                self.target_initialized = True
+            '''
             # Calculate the vector from drone to target
             self.drone_in_odom = np.array([x_odom, y_odom, z_odom], dtype=np.float64)
 
@@ -960,12 +1026,12 @@ def main(cfg):
 
             # Only now connect the service client ticking (once)
             if not self.client_activated:
-
+                
                 og.Controller.connect(
                     self.gate_exec_out_attr,
                     self.client_exec_in_attr,
                 )
-
+                
                 print(
                     "[COLLISION-SERVICE-CLIENT] "
                     "Physics-step gate connected; request interval=2 steps",
@@ -1158,7 +1224,7 @@ def main(cfg):
                         "navigation ready",
                         flush=True,
                     )
-
+            '''
     # =========================================================================
     # Apply patches
     # =========================================================================
@@ -1166,37 +1232,15 @@ def main(cfg):
     NavigationEnv.move_dynamic_obstacle = _patched_move_dynamic_obstacle
     NavigationEnv._post_sim_step = _patched_post_sim_step
 
-    _original_reset_target = NavigationEnv.reset_target
+    # Decoupling test - -Removed _original_reset_target = NavigationEnv.reset_target
     _original_reset_idx = NavigationEnv._reset_idx
 
-    def _patched_reset_target(self, env_ids):
-        if hasattr(self, "_env_min"):
-            xmin, ymin = self._env_min
-            xmax, ymax = self._env_max
-
-            x = xmin + (xmax - xmin) * torch.rand(env_ids.size(0), device=self.device)
-            y = ymin + (ymax - ymin) * torch.rand(env_ids.size(0), device=self.device)
-            z = self._env_z_min + (self._env_z_max - self._env_z_min) * torch.rand(
-                env_ids.size(0), device=self.device
-            )
-            
-            self.target_pos[env_ids, 0, 0] = x
-            self.target_pos[env_ids, 0, 1] = y
-            self.target_pos[env_ids, 0, 2] = z
-            '''
-            # Test
-            self.target_pos[env_ids, 0, 0] = 2.737997915929534
-            self.target_pos[env_ids, 0, 1] = 26.74155297761493
-            self.target_pos[env_ids, 0, 2] = 1.4282457520308882
-            '''
-        else:
-            _original_reset_target(self, env_ids)
-
+    # Decoupling test -  Removed def _patched_reset_target(self, env_ids): ...
 
     def _patched_reset_idx(self, env_ids):
         print("[RESET] Resetting drone position.", flush=True)
         self.drone._reset_idx(env_ids, self.training)
-        self.reset_target(env_ids)
+        # Decoupling test - Removed self.reset_target(env_ids)
 
         if hasattr(self, "_env_min"):
             xmin, ymin = self._env_min
@@ -1209,18 +1253,35 @@ def main(cfg):
             )
 
             pos = torch.zeros(len(env_ids), 1, 3, device=self.device)
+            '''
             pos[:, 0, 0] = x
             pos[:, 0, 1] = y
             pos[:, 0, 2] = z
+            '''
+            # Test Warehouse Isle
+            '''
+            pos[:, 0, 0] = -3.2
+            pos[:, 0, 1] = 7
+            pos[:, 0, 2] = 2.0
+            '''
+            
+            # Test Simple Room
+            pos[:, 0, 0] = 0.0
+            pos[:, 0, 1] = 0.0
+            pos[:, 0, 2] = 1.5
+            
         else:
             return _original_reset_idx(self, env_ids)
 
         #self.target_dir[env_ids] = self.target_pos[env_ids] - pos
 
         rpy = torch.zeros(len(env_ids), 1, 3, device=self.device)
+
+        ''' Decoupling test - Removed
         diff = self.target_pos[env_ids] - pos
         facing_yaw = torch.atan2(diff[..., 1], diff[..., 0])
         rpy[..., 2] = facing_yaw
+        '''
 
         from omni_drones.utils.torch import euler_to_quaternion
         rot = euler_to_quaternion(rpy)
@@ -1228,14 +1289,20 @@ def main(cfg):
         self.drone.set_world_poses(pos, rot, env_ids)
         self.drone.set_velocities(self.init_vels[env_ids], env_ids)
         self.prev_drone_vel_w[env_ids] = 0.
+
+        ''' Decoupling test - Replaced
         self.height_range[env_ids, 0, 0] = torch.min(
             pos[:, 0, 2], self.target_pos[env_ids, 0, 2]
         )
         self.height_range[env_ids, 0, 1] = torch.max(
             pos[:, 0, 2], self.target_pos[env_ids, 0, 2]
         )
+        '''
+        self.height_range[env_ids, 0, 0] = pos[:, 0, 2]
+        self.height_range[env_ids, 0, 1] = pos[:, 0, 2]
+
         self.stats[env_ids] = 0.
-    NavigationEnv.reset_target = _patched_reset_target
+    #Decoupling test - Removed NavigationEnv.reset_target = _patched_reset_target
     NavigationEnv._reset_idx = _patched_reset_idx
 
 
@@ -1245,6 +1312,97 @@ def main(cfg):
     print("[EVAL] Creating environment...")
     env = NavigationEnv(cfg)
 
+    
+    # -------------------------------------------------------------------------
+    # Camera test
+    # RGB-D Camera ROS2 Publisher
+    # -------------------------------------------------------------------------
+    import omni.replicator.core as rep
+    import omni.syntheticdata._syntheticdata as sd
+    from pxr import UsdGeom, Gf
+    import omni.isaac.core.utils.prims as prim_utils
+    import omni
+
+    stage = prim_utils.get_current_stage()
+
+    camera_path = "/World/envs/env_0/Hummingbird_0/base_link/front_camera"
+    camera_frame = "front_camera"
+
+    camera = UsdGeom.Camera.Define(stage, camera_path)
+
+    xform = UsdGeom.Xformable(camera.GetPrim())
+
+    xform.AddTranslateOp().Set(
+        Gf.Vec3d(0.18, 0.0, -0.08)
+    )
+
+    # Temporary orientation for debugging.
+    # USD camera looks along local -Z.
+    xform.AddRotateYOp().Set(-90.0)
+    xform.AddRotateZOp().Set(-90.0)
+
+    camera.CreateFocalLengthAttr(18.0)
+    camera.CreateHorizontalApertureAttr(36.0)
+    camera.CreateVerticalApertureAttr(27.0)
+
+    print(
+        "[CAMERA] valid:",
+        stage.GetPrimAtPath(camera_path).IsValid(),
+        flush=True,
+    )
+
+    # One camera render product feeds both RGB and depth.
+    camera_render_product = rep.create.render_product(
+        camera_path,
+        resolution=(640, 480),
+    )
+
+    # RGB ---------------------------------------------------------------------
+    rgb_rv = omni.syntheticdata.SyntheticData.convert_sensor_type_to_rendervar(
+        sd.SensorType.Rgb.name
+    )
+
+    rgb_writer = rep.writers.get(
+        rgb_rv + "ROS2PublishImage"
+    )
+
+    rgb_writer.initialize(
+        frameId=camera_frame,
+        nodeNamespace="",
+        queueSize=1,
+        topicName="/camera/color/image_raw",
+    )
+
+    rgb_writer.attach([camera_render_product])
+
+    # Depth -------------------------------------------------------------------
+    depth_rv = omni.syntheticdata.SyntheticData.convert_sensor_type_to_rendervar(
+        sd.SensorType.DistanceToImagePlane.name
+    )
+
+    depth_writer = rep.writers.get(
+        depth_rv + "ROS2PublishImage"
+    )
+
+    depth_writer.initialize(
+        frameId=camera_frame,
+        nodeNamespace="",
+        queueSize=1,
+        topicName="/camera/depth/image_raw",
+    )
+
+    depth_writer.attach([camera_render_product])
+
+    # Keep references alive with the environment.
+    env.camera_render_product = camera_render_product
+    env.rgb_writer = rgb_writer
+    env.depth_writer = depth_writer
+
+    print("[CAMERA] RGB-D publishers configured")
+    print("[CAMERA] RGB:   /camera/color/image_raw")
+    print("[CAMERA] Depth: /camera/depth/image_raw")
+    
+    '''
     # Visual-only target marker
     try:
         import omni.isaac.core.utils.prims as prim_utils
@@ -1270,7 +1428,7 @@ def main(cfg):
 
     except Exception as e:
         print(f"[DEBUG-TARGET] failed to create marker: {repr(e)}", flush=True)
-
+    '''
     # Render RTX sensors every N env/sim steps.
     # With dt ~= 0.008 and sim rate ~=125 Hz:
     # N=12 gives about 10.4 Hz target render/LiDAR rate.
@@ -1390,7 +1548,6 @@ def main(cfg):
 
             # PhysX Lidar uses PhysX raycasts.
             # rotation_rate=0.0 means all rays are fired every sensor update
-
             _, lidar_prim = omni.kit.commands.execute(
                 "RangeSensorCreateLidar",
                 path="slam_physx_lidar",
@@ -1402,7 +1559,7 @@ def main(cfg):
                 horizontal_fov=360.0,
                 vertical_fov=45.0,
                 horizontal_resolution=360.0 / 1024.0,
-                vertical_resolution=45.0 / 128.0,
+                vertical_resolution=45.0 / 32.0,
                 rotation_rate=0.0,
                 high_lod=True,
                 yaw_offset=0.0,
@@ -1441,6 +1598,7 @@ def main(cfg):
                         ],
                     },
                 )
+                
 
             else:
 
@@ -1482,6 +1640,31 @@ def main(cfg):
 
     else:
         print("[SLAM-LIDAR] FULLY DISABLED", flush=True)
+
+    # -----------------------------------------------------------------
+    # Deployment test
+    # -----------------------------------------------------------------
+    from geometry_msgs.msg import Twist
+
+    env.latest_cmd_vel = torch.zeros(
+        (1, 1, 3),
+        dtype=torch.float32,
+        device=cfg.device,
+    )
+
+    def _cmd_vel_cb(msg):
+        env.latest_cmd_vel[0, 0, 0] = msg.linear.x
+        env.latest_cmd_vel[0, 0, 1] = msg.linear.y
+        env.latest_cmd_vel[0, 0, 2] = msg.linear.z
+
+    env.cmd_vel_sub = env.navrl_imu_ros_node.create_subscription(
+        Twist,
+        "/unitree_go2/cmd_vel",
+        _cmd_vel_cb,
+        10,
+    )
+
+    print("[CMD-VEL] subscribed to /unitree_go2/cmd_vel", flush=True)
 
     # -----------------------------------------------------------------
     # SLAM IMU ROS2 Python publisher
@@ -1778,11 +1961,15 @@ def main(cfg):
 
         # Initializing placeholders for alignment
         env.world_to_odom = None
+        
+        ''' Decoupling Test - remove
         env.drone_in_odom = None
         env.target_in_odom = np.zeros(4, dtype=np.float64)
         env.target_dir = np.array([1.0, 0.0, 0.0], dtype=np.float64)
         env.initial_drone_pos = np.zeros(3, dtype=np.float64)
-        env.target_initialized = False
+        '''
+        # Decoupling test - Repalced env.target_initialized
+        env.world_to_odom_initialized = False
         env.t_odom_from_lidar = np.eye(4, dtype=np.float64)
 
         # Initializing placeholders for LIO odom
@@ -2012,7 +2199,7 @@ def main(cfg):
     )
     '''
     # Used when hovering is needed
-
+    '''
     collector = SyncDataCollector(
         transformed_env,
         policy=gated_policy,
@@ -2029,7 +2216,28 @@ def main(cfg):
         return_same_td=True,
         exploration_type=ExplorationType.MEAN,
     )
-    
+    '''
+
+    # Deployment test - revert to hover above
+    ros_cmd_policy = ROSCmdVelPolicy(env)
+
+    collector = SyncDataCollector(
+        transformed_env,
+        policy=ros_cmd_policy,
+        frames_per_batch=(
+            cfg.env.num_envs
+            * cfg.algo.training_frame_num
+        ),
+        total_frames=(
+            cfg.env.num_envs
+            * cfg.algo.training_frame_num
+            * 10000
+        ),
+        device=cfg.device,
+        return_same_td=True,
+        exploration_type=ExplorationType.MEAN,
+    )
+
     print("[EVAL] Running policy... (Ctrl+C to stop)")
     try:
         _last_eval_wall_t = time.perf_counter()
@@ -2044,6 +2252,7 @@ def main(cfg):
             '''
             #rclpy.spin_once(env.navrl_imu_ros_node, timeout_sec=0.0)
 
+            ''' Decoupling test - Remove
             # Move visual-only target marker to current NavRL target
             try:
                 from pxr import UsdGeom, Gf
@@ -2061,6 +2270,7 @@ def main(cfg):
 
             except Exception:
                 pass
+            '''
 
             # Print stats if available
             if 'next' in data.keys() and 'stats' in data['next'].keys():
