@@ -560,16 +560,6 @@ class Navigation(Node):
         # Call the service asynchronously
         response = self.get_dyn_obs_client.call(request)
 
-        # DEBUG
-        print("\n========== DYNAMIC SERVICE DEBUG ==========")
-        print("response.position:", response.position)
-        print("response.velocity:", response.velocity)
-        print("response.size:", response.size)
-        print("len(position):", len(response.position))
-        print("len(velocity):", len(response.velocity))
-        print("len(size):", len(response.size))
-        print("===========================================\n")
-
         total_obs_num = len(response.position)
         max_obs_num = self.cfg.algo.feature_extractor.dyn_obs_num
 
@@ -741,8 +731,6 @@ class Navigation(Node):
             })
         })
 
-
-        '''
         has_obstacle_in_range = self.check_obstacle(lidar_scan, dyn_obs_states)
         if (has_obstacle_in_range):
             with set_exploration_type(ExplorationType.MEAN):
@@ -754,79 +742,7 @@ class Navigation(Node):
         else:
             vel_world = (goal - pos)/torch.norm(goal - pos) * self.vel_limit
         return vel_world
-        '''
-        
-        has_obstacle_in_range = self.check_obstacle(lidar_scan, dyn_obs_states)
 
-        if has_obstacle_in_range:
-
-            # TEMP DEBUG: locate first NaN/Inf in dynamic-obstacle → PPO pipeline.
-            print("\n========== NAVRL DEBUG ==========")
-            print("dynamic_obstacle_pos:", dynamic_obstacle_pos)
-            print("dynamic_obstacle_vel:", dynamic_obstacle_vel)
-            print("dynamic_obstacle_size:", dynamic_obstacle_size)
-            print("dyn_obs_states:", dyn_obs_states)
-
-            print(
-                "finite dynamic_obstacle_pos:",
-                torch.isfinite(dynamic_obstacle_pos).all().item()
-            )
-            print(
-                "finite dynamic_obstacle_vel:",
-                torch.isfinite(dynamic_obstacle_vel).all().item()
-            )
-            print(
-                "finite dynamic_obstacle_size:",
-                torch.isfinite(dynamic_obstacle_size).all().item()
-            )
-            print(
-                "finite dyn_obs_states:",
-                torch.isfinite(dyn_obs_states).all().item()
-            )
-
-            with set_exploration_type(ExplorationType.MEAN):
-                output = self.policy(obs)
-
-            vel_local_normalized = output["agents", "action_normalized"]
-
-            print("vel_local_normalized:", vel_local_normalized)
-            print(
-                "finite vel_local_normalized:",
-                torch.isfinite(vel_local_normalized).all().item()
-            )
-
-            vel_local_world = (
-                2.0 * vel_local_normalized * self.vel_limit
-                - self.vel_limit
-            )
-
-            print("vel_local_world:", vel_local_world)
-            print(
-                "finite vel_local_world:",
-                torch.isfinite(vel_local_world).all().item()
-            )
-
-            vel_world = vec_to_world(
-                vel_local_world,
-                output["agents", "observation", "direction"]
-            )
-
-            print("vel_world:", vel_world)
-            print(
-                "finite vel_world:",
-                torch.isfinite(vel_world).all().item()
-            )
-            print("=================================\n")
-
-        else:
-            vel_world = (
-                (goal - pos)
-                / torch.norm(goal - pos)
-                * self.vel_limit
-            )
-
-        return vel_world
-    
     def control_callback(self):
         # self.get_logger().info("[navRunner]: Control callback start.")
 
