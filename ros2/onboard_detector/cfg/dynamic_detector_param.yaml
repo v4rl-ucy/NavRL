@@ -1,14 +1,29 @@
 dynamic_detector_node:
   ros__parameters:
-    localization_mode: 0 # 0: pose (default) 1: odom
-    depth_image_topic: /camera/depth/image_rect_raw
-    color_image_topic: /camera/color/image_raw
+    localization_mode: 1 # 0: pose (default) 1: odom
+    
+    # Isaac Sim
+    #depth_image_topic: /camera/depth/image_rect_raw
+    #color_image_topic: /camera/color/image_raw
+
+    # EagleEye
+    depth_image_topic: /camera/camera/aligned_depth_to_color/image_raw
+    color_image_topic: /camera/camera/color/image_raw
+    
+
     pose_topic: /mavros/local_position/pose
-    odom_topic: /mavros/local_position/odom
+    odom_topic: /eagle/ellipselio/odom    #odom_topic: /mavros/local_position/odom
 
     # camera parameters
-    depth_intrinsics: [386.22674560546875, 386.22674560546875, 317.3930969238281, 239.78431701660156] # fx,  fy, cx, cy realsense
-    color_intrinsics: [608.08740234375, 608.08740234375, 317.48284912109375, 234.11557006835938] # intel realsense
+
+    # Isaac Sim
+    #depth_intrinsics: [386.22674560546875, 386.22674560546875, 317.3930969238281, 239.78431701660156] # fx,  fy, cx, cy realsense
+    #color_intrinsics: [608.08740234375, 608.08740234375, 317.48284912109375, 23>
+
+    # EagleEye
+    depth_intrinsics: [387.26446533203125, 386.7794189453125, 316.88287353515625, 241.74905395507812]
+    color_intrinsics: [387.26446533203125, 386.7794189453125, 316.88287353515625, 241.74905395507812]
+
     depth_scale_factor: 1000.0 # 1000 for Intel Realsense Camera
     depth_min_value: 0.5
     depth_max_value: 5.0

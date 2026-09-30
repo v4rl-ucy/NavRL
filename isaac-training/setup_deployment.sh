@@ -20,6 +20,7 @@ fi
 conda create -n $ENV_NAME python=3.10 -c conda-forge -y
 conda activate "$ENV_NAME"
 python -m pip install numpy==1.26.4
+python -m pip install "opencv-python==4.11.0.86" --no-deps
 
 TORCH_INSTALL="https://developer.download.nvidia.cn/compute/redist/jp/v61/pytorch/torch-2.5.0a0+872d972e41.nv24.08.17622132-cp310-cp310-linux_aarch64.whl"
 python -m pip install --no-cache-dir "$TORCH_INSTALL"

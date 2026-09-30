@@ -18,7 +18,7 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <nav_msgs/msg/odometry.hpp>
-#include <cv_bridge/cv_bridge.hpp>
+#include <cv_bridge/cv_bridge.h>
 #include <vision_msgs/msg/detection2_d_array.hpp>
 #include <onboard_detector/srv/get_dynamic_obstacles.hpp>
 #include <pcl/point_cloud.h>

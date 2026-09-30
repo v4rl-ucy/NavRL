@@ -1789,7 +1789,7 @@ namespace onboardDetector{
         cloud.height = 1;
         cloud.is_dense = true;
         // Make configurable
-        cloud.header.frame_id = "ellipselio/odom";
+        cloud.header.frame_id = "eagle/ellipselio/odom";
 
         sensor_msgs::msg::PointCloud2 cloudMsg;
         pcl::toROSMsg(cloud, cloudMsg);
@@ -1802,7 +1802,7 @@ namespace onboardDetector{
         visualization_msgs::msg::Marker line;
         visualization_msgs::msg::MarkerArray lines;
         // Make confisurable 
-        line.header.frame_id = "ellipselio/odom";
+        line.header.frame_id = "eagle/ellipselio/odom";
         line.type = visualization_msgs::msg::Marker::LINE_LIST;
         line.action = visualization_msgs::msg::Marker::ADD;
         line.ns = "box3D";  
@@ -1913,7 +1913,7 @@ namespace onboardDetector{
         for (size_t i=0; i<this->boxHist_.size(); ++i){
             visualization_msgs::msg::Marker traj;
             // Make Configurable
-            traj.header.frame_id = "ellipselio/odom";
+            traj.header.frame_id = "eagle/ellipselio/odom";
             traj.header.stamp = this->get_clock()->now();
             traj.ns = "dynamic_detector";
             traj.id = countMarker;
@@ -1949,7 +1949,7 @@ namespace onboardDetector{
         for (size_t i=0; i<this->trackedBBoxes_.size(); ++i){
             visualization_msgs::msg::Marker velMarker;
             // Make Configurable
-            velMarker.header.frame_id = "ellipselio/odom";
+            velMarker.header.frame_id = "eagle/ellipselio/odom";
             velMarker.header.stamp = this->get_clock()->now();
             velMarker.ns = "dynamic_detector";
             velMarker.id =  countMarker;
@@ -1995,7 +1995,7 @@ namespace onboardDetector{
             // ============================================================
             visualization_msgs::msg::Marker velMarker;
 
-            velMarker.header.frame_id = "ellipselio/odom";
+            velMarker.header.frame_id = "eagle/ellipselio/odom";
             velMarker.header.stamp = this->get_clock()->now();
             velMarker.ns = "dynamic_detector_velocity_text";
             velMarker.id = countMarker++;
@@ -2034,7 +2034,7 @@ namespace onboardDetector{
             // ============================================================
             visualization_msgs::msg::Marker arrowMarker;
 
-            arrowMarker.header.frame_id = "ellipselio/odom";
+            arrowMarker.header.frame_id = "eagle/ellipselio/odom";
             arrowMarker.header.stamp = this->get_clock()->now();
             arrowMarker.ns = "dynamic_detector_velocity_arrow";
             arrowMarker.id = countMarker++;
